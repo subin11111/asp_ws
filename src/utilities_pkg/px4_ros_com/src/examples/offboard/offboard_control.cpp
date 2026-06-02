@@ -7,6 +7,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
+#include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_status.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/float32.hpp>
@@ -45,6 +47,15 @@ public:
     twist_sub_         = create_subscription<geometry_msgs::msg::Twist>      ("/command/twist",  10, std::bind(&OffboardControl::twist_callback,  this, _1));
     gimbal_pitch_sub_  = create_subscription<std_msgs::msg::Float32>       ("/gimbal_pitch_degree", 10, std::bind(&OffboardControl::gimbal_callback, this, _1));
     disarm_sub_        = create_subscription<std_msgs::msg::Bool>         ("/command/disarm",   10, std::bind(&OffboardControl::disarm_callback, this, _1));
+    vehicle_control_mode_sub_ = create_subscription<VehicleControlMode>(
+      "/fmu/out/vehicle_control_mode", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardControl::vehicle_control_mode_callback, this, _1));
+    vehicle_status_sub_ = create_subscription<VehicleStatus>(
+      "/fmu/out/vehicle_status_v1", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardControl::vehicle_status_callback, this, _1));
+    vehicle_command_ack_sub_ = create_subscription<VehicleCommandAck>(
+      "/fmu/out/vehicle_command_ack", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardControl::vehicle_command_ack_callback, this, _1));
 
     /* ───── TF Listener ───── */
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(tf_buffer_, this, false);
@@ -62,6 +73,9 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr        twist_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr           gimbal_pitch_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr              disarm_sub_;
+  rclcpp::Subscription<VehicleControlMode>::SharedPtr               vehicle_control_mode_sub_;
+  rclcpp::Subscription<VehicleStatus>::SharedPtr                    vehicle_status_sub_;
+  rclcpp::Subscription<VehicleCommandAck>::SharedPtr                vehicle_command_ack_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   /* ───────── TF ───────── */
@@ -78,6 +92,10 @@ private:
   int   setpoint_counter_ = 0;
   bool  target_command_  = false;   // setpoint 수신 여부
   bool  armed_           = false;   // ARM 여부
+  bool  px4_offboard_enabled_ = false;
+  bool  px4_armed_ = false;
+  rclcpp::Time last_offboard_request_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_arm_request_time_{0, 0, RCL_ROS_TIME};
 
   /* ───── PX4 ID 설정 (수정 필요 시) ───── */
   const uint8_t MY_SYSID       = 46;  // 노드(컴패니언)의 sysid
@@ -108,12 +126,29 @@ private:
       return;
     }
 
-    /* (3) 첫 셋포인트 수신 후 10회(≈1 s) 연속 송출 → OFFBOARD 모드 + ARM */
-    if (!armed_ && ++setpoint_counter_ >= 20) {
-      publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);          // OFFBOARD
+    if (setpoint_counter_ < 20) {
+      ++setpoint_counter_;
+      return;
+    }
+
+    /* (3) PX4 실제 상태 기준으로 OFFBOARD/ARM 재요청 */
+    const auto now = this->now();
+    if (!px4_offboard_enabled_ &&
+        (last_offboard_request_time_.nanoseconds() == 0 ||
+         (now - last_offboard_request_time_).seconds() > 1.0)) {
+      publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6); // OFFBOARD
+      last_offboard_request_time_ = now;
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "Requesting OFFBOARD mode because PX4 is not in offboard.");
+    }
+
+    if (!px4_armed_ &&
+        (last_arm_request_time_.nanoseconds() == 0 ||
+         (now - last_arm_request_time_).seconds() > 1.0)) {
       publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0); // ARM
-      armed_ = true;
-      RCLCPP_INFO(get_logger(), "Set OFFBOARD mode & ARM (after pose received)");
+      last_arm_request_time_ = now;
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "Requesting ARM because PX4 is not armed.");
     }
   }
 
@@ -138,6 +173,9 @@ private:
     double roll_ned, pitch_ned, yaw_ned;
     px4_ros_com::frame_transforms::utils::quaternion::quaternion_to_euler(q_px4, roll_ned, pitch_ned, yaw_ned);
     setpoint_.yaw = static_cast<float>(yaw_ned);
+    if (!target_command_) {
+      setpoint_counter_ = 0;
+    }
     target_command_ = true;
     RCLCPP_INFO(get_logger(), "Target pose arrived. X: %.2f Y: %.2f Z: %.2f Yaw: %.2f",
                 setpoint_.position[0], setpoint_.position[1], setpoint_.position[2], setpoint_.yaw);
@@ -157,6 +195,9 @@ private:
     setpoint_.yaw         = NAN;
     // Yaw rate: ENU(+Z up) -> NED(+Z down) → 부호 반전
     setpoint_.yawspeed    = -msg->angular.z;
+    if (!target_command_) {
+      setpoint_counter_ = 0;
+    }
     target_command_ = true;
   }
 
@@ -193,7 +234,44 @@ private:
     RCLCPP_INFO(get_logger(), "DISARM requested at %.2f m (≤limit). Sending command 400", curr_alt);
     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0f, 21196.0f);
     armed_ = false;
+    px4_armed_ = false;
+    px4_offboard_enabled_ = false;
     target_command_ = false;
+    setpoint_counter_ = 0;
+  }
+
+  void vehicle_control_mode_callback(const VehicleControlMode::SharedPtr msg)
+  {
+    px4_offboard_enabled_ = msg->flag_control_offboard_enabled;
+    px4_armed_ = msg->flag_armed;
+    armed_ = px4_armed_;
+  }
+
+  void vehicle_status_callback(const VehicleStatus::SharedPtr msg)
+  {
+    px4_armed_ = (msg->arming_state == VehicleStatus::ARMING_STATE_ARMED);
+    armed_ = px4_armed_;
+    if (msg->failsafe) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "PX4 vehicle_status reports failsafe=true. nav_state=%u arming_state=%u",
+        static_cast<unsigned>(msg->nav_state), static_cast<unsigned>(msg->arming_state));
+    }
+  }
+
+  void vehicle_command_ack_callback(const VehicleCommandAck::SharedPtr msg)
+  {
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+      "VehicleCommandAck command=%u result=%u",
+      static_cast<unsigned>(msg->command), static_cast<unsigned>(msg->result));
+
+    if (msg->result == VehicleCommandAck::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED ||
+        msg->result == VehicleCommandAck::VEHICLE_CMD_RESULT_DENIED ||
+        msg->result == VehicleCommandAck::VEHICLE_CMD_RESULT_FAILED) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "PX4 rejected/failed VehicleCommand command=%u result=%u result_param1=%u result_param2=%d",
+        static_cast<unsigned>(msg->command), static_cast<unsigned>(msg->result),
+        static_cast<unsigned>(msg->result_param1), msg->result_param2);
+    }
   }
 
   /* ────────────────────────── HELPER FNs ────────────────────────── */
