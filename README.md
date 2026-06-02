@@ -338,3 +338,98 @@ ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
 ```
 
 제어 코드, keyboard node, UGV bridge, image bridge topic, PX4/default.sdf는 수정하지 않았다.
+
+## 변경 기록: Mission1 UGV Path Follower 추가
+
+작성 시각: `2026-06-03 00:12:53 KST`
+
+Mission1 구현 시작을 위해 새 패키지 `asp_ugv_control`을 추가했다. 목표는 UGV `X1_asp`가 `mission.csv` waypoint를 저속으로 따라가고, `mission_type=2` waypoint에 도착하면 Mission2 시작 지점으로 판단하여 정지하는 것이다.
+
+전체 명령 흐름은 다음과 같다.
+
+```text
+ugv_path_follower_node
+  -> /command/ugv_cmd_vel
+  -> ugv_cmd_vel_bridge
+  -> /model/X1_asp/cmd_vel
+  -> Gazebo X1_asp
+```
+
+새 패키지 구조는 다음과 같다.
+
+```text
+src/asp_ugv_control/
+├── CMakeLists.txt
+├── package.xml
+├── config/path_follower_params.yaml
+├── docs/MISSION1_UGV_PATH_FOLLOWER.md
+├── launch/ugv_path_follower.launch.py
+├── path/mission.csv
+└── src/ugv_path_follower_node.cpp
+```
+
+`ugv_path_follower_node`의 주요 동작은 다음과 같다.
+
+```text
+node name: ugv_path_follower_node
+output topic: /command/ugv_cmd_vel
+TF: map -> X1_asp/base_link
+state topic: /ugv/state
+event topic: /ugv/mission_event
+CSV format: x,y,mission_type,target_speed
+```
+
+`mission_type=2` waypoint에 도착하면 zero Twist를 publish하고 정지한다. 이때 `/ugv/state`는 `STOPPED`, `/ugv/mission_event`는 `MISSION2_START_REACHED`를 publish한다.
+
+Mission1 path follower는 다음 제어 개념으로 구성했다.
+
+```text
+TF2 기반 현재 pose 조회
+waypoint까지 거리 계산
+target heading과 현재 yaw의 heading error 계산
+waypoint 도달 시 다음 waypoint로 전환
+target marker publish
+mission_type=2를 Mission2 연결 지점으로 해석
+```
+
+현재 workspace 구조에 맞게 다음 제약을 적용했다.
+
+```text
+/model/X1_asp/cmd_vel 직접 publish 금지
+/command/twist 사용 금지
+/command/ugv_cmd_vel만 publish
+UAV takeoff/rendezvous topic 연동 제거
+Mission1 완료 이벤트를 /ugv/mission_event로 publish
+```
+
+빌드와 실행 파일 등록은 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select asp_ugv_control
+ros2 pkg executables asp_ugv_control
+```
+
+정상 출력:
+
+```text
+asp_ugv_control ugv_path_follower_node
+```
+
+실행 순서는 다음과 같다.
+
+```bash
+ros2 launch gazebo_env_setup turn_interfaces.launch.py
+ros2 launch gazebo_env_setup ugv_bridge.launch.py
+ros2 launch asp_ugv_control ugv_path_follower.launch.py
+```
+
+검증 명령은 다음과 같다.
+
+```bash
+ros2 topic echo /command/ugv_cmd_vel
+ros2 topic echo /ugv/state
+ros2 topic echo /ugv/mission_event
+ros2 run tf2_ros tf2_echo map X1_asp/base_link
+```
+
+기존 `utilities_pkg`, UAV keyboard node, UGV keyboard node, `offboard_control.cpp`, `gazebo_env_setup` launch/config, PX4/default.sdf는 수정하지 않았다.

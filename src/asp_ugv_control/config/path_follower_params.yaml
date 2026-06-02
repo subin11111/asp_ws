@@ -1,0 +1,23 @@
+ugv_path_follower_node:
+  ros__parameters:
+    cmd_vel_topic: "/command/ugv_cmd_vel"
+    map_frame: "map"
+    base_frame: "X1_asp/base_link"
+
+    mission_csv: ""
+
+    control_rate_hz: 20.0
+
+    waypoint_tolerance: 0.8
+    stop_tolerance: 0.5
+    lookahead_distance: 1.5
+
+    max_linear_speed: 0.8
+    min_linear_speed: 0.2
+    max_angular_speed: 0.8
+
+    kp_heading: 1.2
+    kp_distance: 0.5
+
+    slow_down_distance: 2.0
+    final_stop_mission_type: 2
