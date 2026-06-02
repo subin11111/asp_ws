@@ -25,3 +25,4 @@ Thumbs.db
 uav_wp.csv
 ugv_wp.csv
 *_wp.csv
+tools/diagnostics/logs/*.log
