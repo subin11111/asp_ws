@@ -1,0 +1,27 @@
+# ROS2 build outputs
+build/
+install/
+log/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editor settings
+.vscode/
+.idea/
+
+# Cache
+.cache/
+.colcon/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Runtime generated waypoint logs
+uav_wp.csv
+ugv_wp.csv
+*_wp.csv
