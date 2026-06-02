@@ -649,3 +649,126 @@ colcon build --packages-select asp_uav_control asp_ugv_control asp_mission_manag
 ```
 
 추가로 `mission_logs/`는 runtime detection log가 생성되는 위치이므로 `.gitignore`에 포함했다.
+
+## 변경 기록: UAV Exploration 좌표계 보정 및 성공 확인
+
+작성 시각: `2026-06-03 04:15:44 KST`
+
+UAV exploration 실행 중 UAV가 waypoint를 따라가기는 하지만, 예상한 marker 방향이 아니라 나무와 장애물 쪽으로 이동하는 문제가 있었다. 처음에는 waypoint CSV 좌표가 현재 Gazebo map과 맞지 않는 문제로 의심했지만, marker pose 기반으로 생성한 `uav_path_generated.csv`와 `uav_path_safe.csv`의 marker 좌표가 Gazebo marker spawn pose와 일치하는 것을 확인했다.
+
+확인된 핵심 원인은 CSV가 아니라 좌표계 변환 방식이었다.
+
+```text
+/command/pose
+  = ROS/Gazebo map ENU 절대좌표
+
+PX4 TrajectorySetpoint
+  = PX4 local NED 상대좌표
+```
+
+기존 `offboard_control`은 `/command/pose`의 map ENU 절대좌표를 그대로 ENU -> NED 축 변환만 수행했다.
+
+```text
+map ENU target: x=-120.26, y=35.85, z=5.40
+기존 변환 결과: x=35.85, y=-120.26, z=-5.40
+```
+
+이 값은 PX4 local origin 기준 상대좌표가 아니라 Gazebo map 절대좌표를 축만 바꾼 값이어서, UAV가 현재 위치 기준 상승 명령이 아닌 먼 위치로 이동하는 명령처럼 해석될 수 있었다.
+
+이번 수정에서는 `/command/pose` position setpoint에만 map origin offset을 적용했다. 첫 `/command/pose` 수신 시 `map -> x500_gimbal_0/base_link` TF를 lookup하고, 그 위치를 PX4 local 변환용 origin으로 잡는다. 이후 target map ENU에서 origin map ENU를 뺀 local ENU를 만든 뒤 기존 ENU -> NED 변환을 수행한다.
+
+```text
+target map ENU = (-120.26, 35.85, 5.40)
+origin map ENU = (-120.26, 35.85, 0.40)
+local ENU      = (0.00, 0.00, 5.00)
+PX4 NED        = (0.00, 0.00, -5.00)
+```
+
+이 구조로 `takeoff_climb`가 현재 위치에서 수직 상승하는 명령으로 해석되는 것을 확인했고, UAV exploration이 정상 방향으로 진행되는 것을 확인했다.
+
+추가한 `offboard_control` parameter는 다음과 같다.
+
+```text
+use_map_origin_offset: true
+auto_set_map_origin_on_first_pose: true
+map_origin_x: 0.0
+map_origin_y: 0.0
+map_origin_z: 0.0
+map_frame: map
+base_frame: x500_gimbal_0/base_link
+publish_debug_setpoints: true
+```
+
+좌표 변환 확인을 위해 다음 debug topic을 추가했다.
+
+```text
+/debug/offboard/input_pose_enu
+/debug/offboard/local_pose_enu
+/debug/offboard/setpoint_pose_ned
+/debug/offboard/frame_report
+```
+
+`/command/twist` manual control은 기존 속도 제어 흐름을 유지하고, map origin offset은 `/command/pose` 기반 position setpoint에만 적용했다. OFFBOARD/ARM runtime recovery, disarm altitude guard, gimbal pitch command도 유지했다.
+
+UAV exploration node에서는 Mission2 Trigger 시점의 실제 UAV 위치를 기준으로 safe prefix를 동적으로 생성하도록 정리했다. UAV는 Mission1 동안 UGV 위에 실려 이동하므로 exploration 시작 위치는 launch 시점이 아니라 `/uav/exploration_start true` 또는 `/mission/state == UAV_EXPLORATION_READY`를 받은 순간의 `map -> x500_gimbal_0/base_link` TF이다.
+
+```text
+start signal
+  -> current UAV TF lookup
+  -> takeoff_climb
+  -> safe_altitude
+  -> transition_001, transition_002, ...
+  -> scan waypoint 후보
+```
+
+`uav_path.csv`는 전체 비행 경로가 아니라 marker scan waypoint 후보 목록으로 취급한다. `dynamic_safe_prefix: true`일 때 runtime에서 앞부분에 safe prefix가 자동으로 붙는다. launch 직후에는 여전히 `/command/pose`를 publish하지 않고, start signal 이후에만 waypoint를 publish한다.
+
+경로 생성 및 검증 보조 도구도 추가했다.
+
+```text
+tools/path_tools/extract_marker_poses.py
+tools/path_tools/generate_uav_path_from_markers.py
+tools/path_tools/generate_safe_uav_path.py
+tools/path_tools/README_path_generation.md
+```
+
+생성 파일은 다음과 같다.
+
+```text
+tools/path_tools/marker_poses.csv
+src/asp_uav_control/path/uav_path_generated.csv
+src/asp_uav_control/path/uav_path_safe.csv
+```
+
+`uav_path_generated.csv`는 marker spawn pose 기반 관측 후보이고, `uav_path_safe.csv`는 시작 위치 기준 safe prefix를 앞에 붙인 검증용 후보이다. 기존 `uav_path.csv`는 자동으로 덮어쓰지 않는다.
+
+marker detection 쪽에서는 `/perception/uav/marker_detections`를 `marker_id` key가 있는 구조화된 문자열로 publish하도록 보강했다. exploration node는 `marker_id` 또는 `id` key만 marker ID로 파싱하고, 좌표나 timestamp 숫자는 marker ID로 취급하지 않는다.
+
+이번 시행착오에서 확인한 순서는 다음과 같다.
+
+```text
+1. 기존 CSV 좌표가 현재 map과 맞지 않을 가능성을 확인
+2. Gazebo marker spawn pose에서 waypoint 후보 자동 생성
+3. generated path와 safe path를 별도 CSV로 생성
+4. launch가 실제 어떤 CSV를 읽는지 로그와 generated launch로 확인
+5. Mission2 Trigger 시점 TF 기준 dynamic safe prefix 생성으로 변경
+6. /command/pose는 정상 map ENU 절대좌표임을 확인
+7. offboard_control이 PX4 local NED 상대좌표가 아니라 절대좌표를 축 변환만 하고 있던 문제 확인
+8. map origin offset 적용 후 local ENU -> PX4 NED 변환으로 보정
+9. UAV exploration 정상 방향 진행 확인
+```
+
+검증에 사용한 주요 명령은 다음과 같다.
+
+```bash
+colcon build --packages-select asp_uav_control asp_perception px4_ros_com
+colcon build --packages-select px4_ros_com
+ros2 topic echo /debug/offboard/input_pose_enu
+ros2 topic echo /debug/offboard/local_pose_enu
+ros2 topic echo /debug/offboard/setpoint_pose_ned
+ros2 topic echo /debug/offboard/frame_report
+ros2 topic echo /uav/exploration_event
+ros2 topic echo /command/pose
+```
+
+runtime log가 저장되는 `mission_logs/`와 diagnostic log 디렉토리는 git에 포함하지 않도록 `.gitignore`에 정리했다.

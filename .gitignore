@@ -25,5 +25,9 @@ Thumbs.db
 uav_wp.csv
 ugv_wp.csv
 *_wp.csv
+
+# Mission runtime logs
 mission_logs/
-tools/diagnostics/logs/*.log
+
+# Diagnostic logs
+tools/diagnostics/logs/

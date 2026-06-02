@@ -188,15 +188,9 @@ private:
     }
 
     visualization_msgs::msg::MarkerArray marker_array;
-    std::ostringstream detection_text;
-    detection_text << "markers=[";
     const double stamp_sec = rclcpp::Time(msg->header.stamp).seconds();
 
     for (size_t i = 0; i < ids.size(); ++i) {
-      if (i > 0) {
-        detection_text << ";";
-      }
-
       const cv::Vec3d tvec = i < tvecs.size() ?
         tvecs[i] :
         cv::Vec3d(
@@ -205,21 +199,16 @@ private:
           std::numeric_limits<double>::quiet_NaN());
 
       auto map_point = transform_to_map(tvec, msg->header.stamp);
-      detection_text << "id=" << ids[i]
-                     << ",camera=(" << tvec[0] << "," << tvec[1] << "," << tvec[2] << ")"
-                     << ",map=(" << map_point.point.x << "," << map_point.point.y << ","
-                     << map_point.point.z << ")";
+      std_msgs::msg::String text_msg;
+      text_msg.data = make_detection_json(ids[i], tvec, map_point);
+      detections_pub_->publish(text_msg);
 
       publish_marker_id(ids[i]);
       add_marker(marker_array, ids[i], map_point, msg->header.stamp);
       maybe_write_csv(stamp_sec, ids[i], tvec, map_point);
     }
 
-    detection_text << "]";
     if (!ids.empty()) {
-      std_msgs::msg::String text_msg;
-      text_msg.data = detection_text.str();
-      detections_pub_->publish(text_msg);
       marker_array_pub_->publish(marker_array);
     }
 
@@ -298,6 +287,35 @@ private:
     std_msgs::msg::Int32 msg;
     msg.data = id;
     marker_id_pub_->publish(msg);
+  }
+
+  std::string json_number_or_null(double value) const
+  {
+    if (!std::isfinite(value)) {
+      return "null";
+    }
+    std::ostringstream stream;
+    stream << value;
+    return stream.str();
+  }
+
+  std::string make_detection_json(
+    int id,
+    const cv::Vec3d & camera_point,
+    const geometry_msgs::msg::PointStamped & map_point) const
+  {
+    std::ostringstream stream;
+    stream << "{"
+           << "\"marker_id\":" << id << ","
+           << "\"source\":\"uav_camera\","
+           << "\"camera_x\":" << json_number_or_null(camera_point[0]) << ","
+           << "\"camera_y\":" << json_number_or_null(camera_point[1]) << ","
+           << "\"camera_z\":" << json_number_or_null(camera_point[2]) << ","
+           << "\"map_x\":" << json_number_or_null(map_point.point.x) << ","
+           << "\"map_y\":" << json_number_or_null(map_point.point.y) << ","
+           << "\"map_z\":" << json_number_or_null(map_point.point.z)
+           << "}";
+    return stream.str();
   }
 
   void add_marker(

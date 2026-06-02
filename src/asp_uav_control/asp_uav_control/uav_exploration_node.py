@@ -56,8 +56,9 @@ class UavExplorationNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.waypoints: List[Waypoint] = self.load_path(self.path_csv)
-        self.state = ExplorationState.IDLE if self.waypoints else ExplorationState.ERROR
+        self.scan_waypoints: List[Waypoint] = self.load_path(self.path_csv)
+        self.waypoints: List[Waypoint] = []
+        self.state = ExplorationState.IDLE if self.scan_waypoints else ExplorationState.ERROR
         self.current_index = 0
         self.hold_start = None
         self.exploration_start_time = None
@@ -68,10 +69,18 @@ class UavExplorationNode(Node):
         period = 1.0 / max(1.0, self.pose_publish_rate_hz)
         self.timer = self.create_timer(period, self.timer_cb)
 
-        if self.start_on_launch and self.waypoints:
+        if self.start_on_launch and self.scan_waypoints:
             self.start_exploration('start_on_launch')
 
-        self.get_logger().info(f'uav_exploration_node loaded {len(self.waypoints)} waypoints')
+        self.get_logger().info(f'UAV exploration path_csv: {self.path_csv}')
+        self.get_logger().info(f'Loaded UAV scan waypoints: {len(self.scan_waypoints)}')
+        if self.scan_waypoints:
+            first = self.scan_waypoints[0]
+            self.get_logger().info(
+                'First scan waypoint: '
+                f'x={first.x}, y={first.y}, z={first.z}, '
+                f'yaw_deg={first.yaw_deg}, '
+                f'gimbal_pitch_deg={first.gimbal_pitch_deg}, tag={first.tag}')
         self.get_logger().info(f'command_pose_topic: {self.command_pose_topic}')
 
     def declare_params(self):
@@ -97,6 +106,17 @@ class UavExplorationNode(Node):
         self.declare_parameter('minimum_unique_markers', 0)
         self.declare_parameter('exploration_timeout_sec', 300.0)
         self.declare_parameter('resend_current_pose_before_start', True)
+        self.declare_parameter('use_safe_path', False)
+        self.declare_parameter('safe_path_csv', '')
+        self.declare_parameter('min_marker_id', 0)
+        self.declare_parameter('max_marker_id', 49)
+        self.declare_parameter('dynamic_safe_prefix', True)
+        self.declare_parameter('safe_takeoff_relative_height', 5.0)
+        self.declare_parameter('safe_altitude', 18.0)
+        self.declare_parameter('transition_altitude', 18.0)
+        self.declare_parameter('max_transition_step', 15.0)
+        self.declare_parameter('safe_prefix_hold_sec', 2.0)
+        self.declare_parameter('safe_prefix_gimbal_pitch_deg', -60.0)
 
     def read_params(self):
         self.path_csv = self.get_parameter('path_csv').value
@@ -122,6 +142,19 @@ class UavExplorationNode(Node):
         self.exploration_timeout_sec = float(self.get_parameter('exploration_timeout_sec').value)
         self.resend_current_pose_before_start = self.get_parameter(
             'resend_current_pose_before_start').value
+        self.use_safe_path = self.get_parameter('use_safe_path').value
+        self.safe_path_csv = self.get_parameter('safe_path_csv').value
+        self.min_marker_id = int(self.get_parameter('min_marker_id').value)
+        self.max_marker_id = int(self.get_parameter('max_marker_id').value)
+        self.dynamic_safe_prefix = self.get_parameter('dynamic_safe_prefix').value
+        self.safe_takeoff_relative_height = float(
+            self.get_parameter('safe_takeoff_relative_height').value)
+        self.safe_altitude = float(self.get_parameter('safe_altitude').value)
+        self.transition_altitude = float(self.get_parameter('transition_altitude').value)
+        self.max_transition_step = float(self.get_parameter('max_transition_step').value)
+        self.safe_prefix_hold_sec = float(self.get_parameter('safe_prefix_hold_sec').value)
+        self.safe_prefix_gimbal_pitch_deg = float(
+            self.get_parameter('safe_prefix_gimbal_pitch_deg').value)
 
     def load_path(self, path_csv: str) -> List[Waypoint]:
         if not path_csv:
@@ -150,32 +183,183 @@ class UavExplorationNode(Node):
         if (
             self.start_on_mission_state
             and msg.data == self.required_start_state
-            and self.state in (ExplorationState.IDLE, ExplorationState.READY)
+            and self.state in (ExplorationState.IDLE, ExplorationState.READY, ExplorationState.WAITING_FOR_TF)
         ):
             self.start_exploration(f'mission_state:{msg.data}')
 
     def exploration_start_cb(self, msg: Bool):
-        if msg.data and self.state in (ExplorationState.IDLE, ExplorationState.READY):
+        if msg.data and self.state in (ExplorationState.IDLE, ExplorationState.READY, ExplorationState.WAITING_FOR_TF):
             self.start_exploration('manual_start')
 
     def marker_detections_cb(self, msg: String):
-        for token in re.findall(r'-?\d+', msg.data):
-            marker_id = int(token)
+        marker_ids = self.extract_marker_ids(msg.data)
+        if not marker_ids:
+            self.get_logger().warn(
+                f'No marker_id key found in marker detection: {msg.data}',
+                throttle_duration_sec=2.0)
+            return
+        for marker_id in marker_ids:
+            if not self.is_marker_id_in_range(marker_id):
+                self.get_logger().warn(
+                    f'Ignoring out-of-range UAV marker ID: {marker_id}',
+                    throttle_duration_sec=2.0)
+                continue
             if marker_id not in self.unique_marker_ids:
                 self.unique_marker_ids.add(marker_id)
                 self.get_logger().info(f'Unique UAV marker recorded: {marker_id}')
 
+    def extract_marker_ids(self, text: str) -> List[int]:
+        try:
+            parsed = json.loads(text)
+            ids = self.marker_ids_from_json(parsed)
+            if ids:
+                return ids
+        except json.JSONDecodeError:
+            pass
+
+        return [
+            int(match.group(1))
+            for match in re.finditer(r'(?:marker_id|id)\s*[:=]\s*(-?\d+)', text)
+        ]
+
+    def marker_ids_from_json(self, parsed) -> List[int]:
+        if isinstance(parsed, dict):
+            for key in ('marker_id', 'id'):
+                if key in parsed:
+                    try:
+                        return [int(parsed[key])]
+                    except (TypeError, ValueError):
+                        return []
+            ids: List[int] = []
+            for value in parsed.values():
+                ids.extend(self.marker_ids_from_json(value))
+            return ids
+        if isinstance(parsed, list):
+            ids: List[int] = []
+            for item in parsed:
+                ids.extend(self.marker_ids_from_json(item))
+            return ids
+        return []
+
+    def is_marker_id_in_range(self, marker_id: int) -> bool:
+        return self.min_marker_id <= marker_id <= self.max_marker_id
+
     def start_exploration(self, reason: str):
+        self.get_logger().info('Exploration start requested.')
+        if not self.scan_waypoints:
+            self.state = ExplorationState.ERROR
+            self.publish_event('ERROR:NO_WAYPOINTS')
+            return
+        start_tf = self.lookup_current_tf()
+        if start_tf is None:
+            self.state = ExplorationState.WAITING_FOR_TF
+            self.publish_event('WAITING_FOR_TF:START_POSE')
+            return
+
+        start_x = start_tf.transform.translation.x
+        start_y = start_tf.transform.translation.y
+        start_z = start_tf.transform.translation.z
+        self.get_logger().info(
+            f'Current UAV start pose from TF: x={start_x}, y={start_y}, z={start_z}')
+        self.get_logger().info(f'Dynamic safe prefix enabled: {self.dynamic_safe_prefix}')
+        self.get_logger().info(f'Original scan waypoint count: {len(self.scan_waypoints)}')
+
+        if self.dynamic_safe_prefix:
+            self.waypoints = self.create_dynamic_safe_path(start_x, start_y, start_z)
+            self.publish_event('DYNAMIC_SAFE_PREFIX_CREATED')
+        else:
+            self.waypoints = list(self.scan_waypoints)
+
         if not self.waypoints:
             self.state = ExplorationState.ERROR
             self.publish_event('ERROR:NO_WAYPOINTS')
             return
+
+        self.log_start_path_summary()
         self.current_index = 0
         self.hold_start = None
         self.exploration_start_time = self.get_clock().now()
         self.complete_published = False
         self.state = ExplorationState.EXPLORING
-        self.publish_event(f'EXPLORATION_STARTED:{reason}')
+        self.get_logger().info(f'Exploration start reason: {reason}')
+        self.publish_event('EXPLORATION_STARTED')
+
+    def create_dynamic_safe_path(self, start_x: float, start_y: float, start_z: float) -> List[Waypoint]:
+        first_scan = self.scan_waypoints[0]
+        heading_to_scan = self.yaw_to_target_deg(start_x, start_y, first_scan.x, first_scan.y)
+        safe_pitch = self.clamp(self.safe_prefix_gimbal_pitch_deg, -90.0, 20.0)
+        safe_hold = max(0.0, self.safe_prefix_hold_sec)
+        waypoints = [
+            Waypoint(
+                x=start_x,
+                y=start_y,
+                z=max(5.0, start_z + self.safe_takeoff_relative_height),
+                yaw_deg=heading_to_scan,
+                gimbal_pitch_deg=safe_pitch,
+                hold_sec=safe_hold,
+                tag='takeoff_climb',
+            ),
+            Waypoint(
+                x=start_x,
+                y=start_y,
+                z=max(5.0, self.safe_altitude),
+                yaw_deg=heading_to_scan,
+                gimbal_pitch_deg=safe_pitch,
+                hold_sec=safe_hold,
+                tag='safe_altitude',
+            ),
+        ]
+
+        distance = math.hypot(first_scan.x - start_x, first_scan.y - start_y)
+        if self.max_transition_step > 0.0 and distance > self.max_transition_step:
+            transition_count = max(0, math.ceil(distance / self.max_transition_step) - 1)
+            for index in range(1, transition_count + 1):
+                ratio = index / (transition_count + 1)
+                x = start_x + (first_scan.x - start_x) * ratio
+                y = start_y + (first_scan.y - start_y) * ratio
+                next_ratio = min(1.0, (index + 1) / (transition_count + 1))
+                next_x = start_x + (first_scan.x - start_x) * next_ratio
+                next_y = start_y + (first_scan.y - start_y) * next_ratio
+                waypoints.append(Waypoint(
+                    x=x,
+                    y=y,
+                    z=max(5.0, self.transition_altitude),
+                    yaw_deg=self.yaw_to_target_deg(x, y, next_x, next_y),
+                    gimbal_pitch_deg=safe_pitch,
+                    hold_sec=safe_hold,
+                    tag=f'transition_{index:03d}',
+                ))
+
+        waypoints.extend(self.scan_waypoints)
+        return waypoints
+
+    def log_start_path_summary(self):
+        self.get_logger().info(f'Final waypoint count with safe prefix: {len(self.waypoints)}')
+        for index, waypoint in enumerate(self.waypoints[:5]):
+            self.get_logger().info(
+                f'Waypoint preview {index}: tag={waypoint.tag}, '
+                f'x={waypoint.x}, y={waypoint.y}, z={waypoint.z}, '
+                f'yaw_deg={waypoint.yaw_deg}, '
+                f'gimbal_pitch_deg={waypoint.gimbal_pitch_deg}')
+        first_scan = self.scan_waypoints[0]
+        self.get_logger().info(
+            f'First scan waypoint: tag={first_scan.tag}, '
+            f'x={first_scan.x}, y={first_scan.y}, z={first_scan.z}, '
+            f'yaw_deg={first_scan.yaw_deg}, '
+            f'gimbal_pitch_deg={first_scan.gimbal_pitch_deg}')
+
+    def yaw_to_target_deg(self, current_x: float, current_y: float, target_x: float, target_y: float) -> float:
+        return self.normalize_yaw_deg(math.degrees(math.atan2(target_y - current_y, target_x - current_x)))
+
+    def normalize_yaw_deg(self, yaw_deg: float) -> float:
+        while yaw_deg > 180.0:
+            yaw_deg -= 360.0
+        while yaw_deg < -180.0:
+            yaw_deg += 360.0
+        return yaw_deg
+
+    def clamp(self, value: float, minimum: float, maximum: float) -> float:
+        return max(minimum, min(maximum, value))
 
     def timer_cb(self):
         if self.state == ExplorationState.ERROR:
@@ -207,11 +391,13 @@ class UavExplorationNode(Node):
         current_tf = self.lookup_current_tf()
         if current_tf is None:
             self.state = ExplorationState.WAITING_FOR_TF
-            self.publish_current_target_pose()
             self.publish_state()
             return
 
         if self.state == ExplorationState.WAITING_FOR_TF:
+            if self.exploration_start_time is None:
+                self.publish_state()
+                return
             self.state = ExplorationState.EXPLORING
 
         waypoint = self.waypoints[self.current_index]
@@ -294,6 +480,7 @@ class UavExplorationNode(Node):
             'state': self.state.value,
             'current_index': self.current_index,
             'waypoints': len(self.waypoints),
+            'scan_waypoints': len(self.scan_waypoints),
             'unique_markers': sorted(self.unique_marker_ids),
         }
         msg.data = json.dumps(status)

@@ -1,6 +1,15 @@
 uav_exploration_node:
   ros__parameters:
     path_csv: ""
+    use_safe_path: false
+    safe_path_csv: ""
+    dynamic_safe_prefix: true
+    safe_takeoff_relative_height: 5.0
+    safe_altitude: 18.0
+    transition_altitude: 18.0
+    max_transition_step: 15.0
+    safe_prefix_hold_sec: 2.0
+    safe_prefix_gimbal_pitch_deg: -60.0
 
     map_frame: "map"
     base_frame: "x500_gimbal_0/base_link"
@@ -15,6 +24,8 @@ uav_exploration_node:
     exploration_complete_topic: "/mission/uav_exploration_complete"
 
     marker_detections_topic: "/perception/uav/marker_detections"
+    min_marker_id: 0
+    max_marker_id: 49
 
     start_on_launch: false
     start_on_mission_state: true

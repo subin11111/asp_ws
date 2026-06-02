@@ -38,6 +38,17 @@ camera_info가 들어오면 OpenCV ArUco pose estimation으로 marker의 camera 
 
 pose estimation 또는 TF 변환이 실패해도 marker ID와 annotated image publish는 계속 수행한다. 이 경우 map 좌표는 `nan`으로 기록한다.
 
+## marker_detections 형식
+
+`/perception/uav/marker_detections`는 `marker_id` key를 포함한 구조화된 문자열로 publish한다.
+
+```json
+{"marker_id":14,"source":"uav_camera","camera_x":0.12,"camera_y":-0.03,"camera_z":4.5,"map_x":-97.2,"map_y":67.4,"map_z":15.0}
+```
+
+`asp_uav_control`의 exploration node는 `marker_id` 또는 `id` key만 marker ID로 파싱한다.
+따라서 좌표, 시간, stamp에 포함된 숫자는 marker ID로 취급하지 않는다.
+
 ## RViz 확인
 
 ```bash
