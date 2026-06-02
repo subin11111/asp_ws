@@ -1,0 +1,24 @@
+ugv_aruco_detector_node:
+  ros__parameters:
+    image_topic: "/world/default/model/X1_asp/link/base_link/sensor/camera_front/image"
+    camera_info_topic: "/world/default/model/X1_asp/link/base_link/sensor/camera_front/camera_info"
+
+    annotated_image_topic: "/perception/aruco/annotated"
+    marker_id_topic: "/perception/marker_id"
+    marker_detections_topic: "/perception/marker_detections"
+    mission2_trigger_topic: "/perception/mission2_trigger"
+    mission2_manager_trigger_topic: "/mission/mission2_trigger"
+    publish_manager_trigger: false
+
+    ugv_mission_event_topic: "/ugv/mission_event"
+    required_ugv_event: "MISSION2_START_REACHED"
+    require_ugv_event: false
+
+    target_marker_id: 0
+    marker_size_m: 0.5
+    dictionary: "DICT_4X4_50"
+
+    consecutive_detection_threshold: 3
+    trigger_once: true
+    publish_debug_image: true
+    use_camera_info: true

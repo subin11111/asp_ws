@@ -1,0 +1,21 @@
+mission_manager_node:
+  ros__parameters:
+    auto_start: true
+    publish_rate_hz: 2.0
+
+    mission_start_topic: "/mission/start"
+    mission_reset_topic: "/mission/reset"
+
+    ugv_state_topic: "/ugv/state"
+    ugv_mission_event_topic: "/ugv/mission_event"
+
+    perception_trigger_topic: "/perception/mission2_trigger"
+
+    mission_state_topic: "/mission/state"
+    mission_status_topic: "/mission/status"
+    mission2_trigger_topic: "/mission/mission2_trigger"
+
+    command_takeoff_topic: "/command/takeoff"
+    auto_publish_takeoff: false
+
+    required_mission2_event: "MISSION2_START_REACHED"

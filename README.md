@@ -433,3 +433,109 @@ ros2 run tf2_ros tf2_echo map X1_asp/base_link
 ```
 
 기존 `utilities_pkg`, UAV keyboard node, UGV keyboard node, `offboard_control.cpp`, `gazebo_env_setup` launch/config, PX4/default.sdf는 수정하지 않았다.
+
+## 변경 기록: Mission2 Trigger FSM 추가
+
+작성 시각: `2026-06-03 01:11:52 KST`
+
+Mission2 진입 조건을 ArUco marker 검출이 아니라 UGV가 Mission1 종료 지점에 도착했는지 여부로 정리했다. 이에 따라 Mission2 Trigger의 주 publisher는 새 `mission_manager_node`가 담당하도록 구성했다.
+
+최종 Mission2 trigger 흐름은 다음과 같다.
+
+```text
+ugv_path_follower_node
+  -> /ugv/mission_event: MISSION2_START_REACHED
+  -> mission_manager_node
+  -> /mission/mission2_trigger: true
+  -> /mission/state: UAV_TAKEOFF_READY
+```
+
+새 패키지 `asp_mission_manager`를 추가했다.
+
+```text
+src/asp_mission_manager/
+├── asp_mission_manager/mission_manager_node.py
+├── config/mission_manager_params.yaml
+├── docs/MISSION_FSM.md
+├── launch/mission_manager.launch.py
+├── package.xml
+├── setup.cfg
+└── setup.py
+```
+
+`mission_manager_node`의 FSM 상태는 다음과 같다.
+
+```text
+INIT
+READY
+MISSION1_RUNNING
+MISSION2_TRIGGERED
+UAV_TAKEOFF_READY
+UAV_TAKEOFF_REQUESTED
+```
+
+주요 topic은 다음과 같다.
+
+```text
+Subscriptions:
+/mission/start
+/mission/reset
+/ugv/state
+/ugv/mission_event
+/perception/mission2_trigger
+
+Publishers:
+/mission/state
+/mission/status
+/mission/mission2_trigger
+/command/takeoff
+```
+
+`/ugv/mission_event`에서 `MISSION2_START_REACHED`를 받으면 `MISSION1_RUNNING` 또는 `READY` 상태에서 `MISSION2_TRIGGERED`로 전환하고, `/mission/mission2_trigger`에 `true`를 한 번 publish한다. 이후 상태는 `UAV_TAKEOFF_READY`가 된다.
+
+`auto_publish_takeoff`는 기본값 `false`로 두었다. 따라서 현재 단계에서는 Mission2 Trigger와 FSM 상태 전환만 확인하고, UAV takeoff 명령 자동 발행은 나중에 활성화한다.
+
+또한 새 패키지 `asp_perception`을 추가했다. 이 패키지는 현재 Mission2 진입 판단의 주체가 아니라, 나중에 marker exploration 또는 precision landing에 사용할 perception 기능으로 유지한다.
+
+```text
+src/asp_perception/
+├── CMakeLists.txt
+├── config/aruco_detector_params.yaml
+├── docs/MISSION2_TRIGGER_ARUCO.md
+├── launch/ugv_aruco_detector.launch.py
+├── package.xml
+└── src/ugv_aruco_detector_node.cpp
+```
+
+`asp_perception`은 기본값에서 `/mission/mission2_trigger`를 publish하지 않는다. 대신 marker ID `0` 검출 시 `/perception/mission2_trigger`만 publish한다. mission manager는 이 값을 status에 기록만 하고, 현재 FSM 전이는 UGV 위치 도착 event로만 수행한다.
+
+RViz의 Marker Detected display topic은 다음으로 변경했다.
+
+```text
+/perception/aruco/annotated
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select asp_mission_manager asp_perception
+```
+
+정상 실행 파일은 다음과 같다.
+
+```text
+asp_mission_manager mission_manager_node
+asp_perception ugv_aruco_detector_node
+```
+
+Mission manager 단독 검증 명령은 다음과 같다.
+
+```bash
+ros2 launch asp_mission_manager mission_manager.launch.py
+ros2 topic echo /mission/state
+ros2 topic echo /mission/status
+ros2 topic echo /mission/mission2_trigger
+ros2 topic pub --once /ugv/mission_event std_msgs/msg/String "{data: MISSION2_START_REACHED}"
+```
+
+기존 UAV/UGV 제어 코드, keyboard node, bridge launch, PX4/default.sdf는 수정하지 않았다.
