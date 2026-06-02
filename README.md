@@ -611,9 +611,42 @@ Marker Detected 처리 이미지 표시: 성공
 
 ---
 
+## 팀원 공유용 요약
 
+```text
+ArUco Marker Detection 정상 동작 확인했습니다.
+
+현재 UAV 카메라 영상에서 marker ID를 검출하고,
+/aruco/marker_id,
+/aruco/marker_pose,
+/aruco/marker_pose_map
+토픽으로 발행됩니다.
+
+또한 /offboard_control/image_proc 토픽으로
+ArUco marker 박스와 ID가 표시된 처리 이미지를 발행하며,
+RViz의 Marker Detected 패널에서 정상 표시되는 것을 확인했습니다.
+
+RViz Fixed Frame은 map으로 설정했고,
+TF Tree에서 map → x500_gimbal_0/base_link → x500_gimbal_0/camera_link를 확인했습니다.
+X1_asp/base_link도 TF Tree에서 확인했습니다.
+
+확인된 예시:
+marker_id: 0
+camera_frame: x500_gimbal_0/camera_link
+camera_position: x=-4.026, y=1.054, z=-1.778
+map_frame: map
+map_position: x=-96.782, y=101.302, z=14.407
+
+검출 결과는 marker_detections.csv에도 저장됩니다.
+```
 
 ---
 
+## 발표용 설명
 
+본인은 Mission 2의 UAV Exploration 단계에서 ArUco Marker Detection을 담당하였다.  
+UAV 카메라 영상에서 ArUco Marker를 검출하고, marker ID와 pose를 계산하였다.  
+계산된 pose는 카메라 기준 좌표로 `/aruco/marker_pose`에 발행하고, TF를 이용해 map 기준 좌표로 변환하여 `/aruco/marker_pose_map`에 발행하였다.  
+또한 검출된 marker ID와 위치 좌표를 CSV 파일로 저장하여 탐색 결과로 활용할 수 있도록 구현하였다.  
+추가로 RViz의 `Marker Detected` 패널에서 검출된 마커 박스와 ID가 표시되도록 `/offboard_control/image_proc` 처리 이미지 토픽을 발행하였다.
 ````
