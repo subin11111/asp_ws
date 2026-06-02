@@ -5,12 +5,20 @@ def generate_launch_description():
 
     bridge_args = [
         '/clock@rosgraph_msgs/msg/Clock@gz.msgs.Clock',
-        '/rgb_camera@sensor_msgs/msg/Image@gz.msgs.Image',
-        '/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo',
-        '/drone_0_pcl_render_node/depth@sensor_msgs/msg/Image@gz.msgs.Image',
-        '/drone_0_pcl_render_node/depth/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked',
-        '/world/default/model/x500_depth_0/link/base_link/sensor/imu_sensor/imu'
-        '@sensor_msgs/msg/Imu@gz.msgs.IMU',
+        '/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image'
+        '@sensor_msgs/msg/Image[gz.msgs.Image',
+        '/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info'
+        '@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+        '/world/default/model/X1_asp/link/base_link/sensor/camera_front/image'
+        '@sensor_msgs/msg/Image[gz.msgs.Image',
+        '/world/default/model/X1_asp/link/base_link/sensor/camera_front/camera_info'
+        '@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
+        '/world/default/model/X1_asp/link/base_link/sensor/gpu_lidar/scan/points'
+        '@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
+        '/world/default/model/x500_gimbal_0/link/base_link/sensor/imu_sensor/imu'
+        '@sensor_msgs/msg/Imu[gz.msgs.IMU',
+        '/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera_imu/imu'
+        '@sensor_msgs/msg/Imu[gz.msgs.IMU',
     ]
 
     parameter_bridge_node = Node(

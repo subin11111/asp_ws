@@ -160,7 +160,7 @@ Visualization Manager:
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /world/default/model/X1_asp/link/base_link/sensor/gpu_lidar/scan/points
       Use Fixed Frame: true
       Use rainbow: true
@@ -176,7 +176,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /world/default/model/X1_asp/link/base_link/sensor/camera_front/image
       Value: true
     - Class: rviz_default_plugins/Image
@@ -190,7 +190,7 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
       Value: true
     - Class: rviz_default_plugins/Marker

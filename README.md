@@ -235,3 +235,45 @@ ros2 run ros_gz_bridge parameter_bridge \
 ```
 
 이 명령은 `/command/twist`가 UAV와 UGV에 동시에 연결되어 명령이 섞일 수 있으므로 사용하지 않는다.
+
+## 변경 기록: RViz Camera Bridge 수정
+
+작성 시각: `2026-06-02 21:43:09 KST`
+
+RViz에서 `UAV_Image`, `UGV_Image`, `Marker Detected` 패널에 `No Image`가 표시되는 문제를 확인했다. 핵심 원인은 현재 Gazebo 모델 topic은 `X1_asp`, `x500_gimbal_0` 기준으로 생성되어 있는데, bridge 설정에는 예전 camera topic이 남아 있어 image topic이 ROS2로 전달되지 않는 점이었다.
+
+이번 수정에서는 `gazebo_env_setup/launch/bridge_and_tf.launch.py`의 `bridge_args`를 현재 실제 Gazebo topic 기준으로 갱신했다.
+
+```text
+/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info
+/world/default/model/X1_asp/link/base_link/sensor/camera_front/image
+/world/default/model/X1_asp/link/base_link/sensor/camera_front/camera_info
+/world/default/model/X1_asp/link/base_link/sensor/gpu_lidar/scan/points
+/world/default/model/x500_gimbal_0/link/base_link/sensor/imu_sensor/imu
+/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera_imu/imu
+```
+
+또한 `gazebo_env_setup/config/asp_final_proj.rviz`에서 RViz display QoS를 Gazebo bridge topic과 맞추기 위해 다음 display의 Reliability Policy를 `Best Effort`로 변경했다.
+
+```text
+UAV_Image
+UGV_Image
+GPU_LiDAR
+```
+
+RViz display topic은 다음 값을 사용한다.
+
+```text
+UAV_Image: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+UGV_Image: /world/default/model/X1_asp/link/base_link/sensor/camera_front/image
+GPU_LiDAR: /world/default/model/X1_asp/link/base_link/sensor/gpu_lidar/scan/points
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select gazebo_env_setup
+```
+
+제어 코드, keyboard node, UGV bridge, PX4 파일은 수정하지 않았다.
