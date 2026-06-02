@@ -1,237 +1,448 @@
-# ASP ROS2 Workspace
+아래 그대로 복붙해서 `README.md`에 넣으면 돼.
 
-## 목적
+````markdown
+# UAV ArUco Marker Detection
 
-이 문서는 `jsb` 브랜치 기준으로 ASP ROS2 workspace에서 변경한 제어 구조와 실행 방법을 정리한다. 원래 브랜치/원본 코드 대비 UAV와 UGV 명령 토픽이 섞일 수 있는 문제를 분리하고, UGV 전용 keyboard control과 Gazebo bridge를 추가한 내용을 설명한다.
+## 담당자
 
-## 프로젝트 개요
+**이승윤 — UAV ArUco Marker Detection 담당**
 
-이 저장소는 ASP 자율주행 시스템 플랫폼 실험을 위한 ROS2 workspace이다. PX4 SITL + Gazebo 환경과 연동하여 UAV/UGV 제어 실험을 수행한다.
+본 패키지는 UAV 카메라 영상을 기반으로 ArUco Marker를 검출하고, 검출된 마커의 ID와 위치 좌표를 계산하여 저장하는 기능을 수행한다.
 
-기존 제공 패키지를 기반으로 UGV 전용 keyboard control과 bridge를 추가했다. 최종 목표는 UAV 제어 명령과 UGV 제어 명령을 서로 다른 ROS2 topic으로 분리하여 두 차량을 독립적으로 운용하는 것이다.
-
-## 기존 문제 구조
-
-기존 `keyboard_control_node`는 `/command/twist`를 publish했고, 이 토픽은 UAV offboard control에 사용되었다.
+Mission 2 - UAV에서 담당하는 핵심 기능은 다음과 같다.
 
 ```text
-keyboard_control_node
-  -> /command/twist
-  -> offboard_control
-  -> PX4 UAV control
+Detect ArUco marker and save its position with ID
+````
+
+---
+
+## 최종 동작 결과
+
+현재 다음 기능이 정상 동작함을 확인하였다.
+
+```text
+1. UAV 카메라 영상 수신
+2. ArUco Marker ID 검출
+3. 카메라 기준 marker pose 계산
+4. TF를 이용한 map 기준 marker pose 변환
+5. marker ID와 좌표 CSV 저장
 ```
 
-UGV를 임시로 움직이기 위해 다음 bridge를 사용했을 때 문제가 발생했다.
+확인된 예시 결과:
+
+```text
+marker_id: 0
+
+camera_frame: x500_gimbal_0/camera_link
+camera_position:
+  x: -4.026
+  y:  1.054
+  z: -1.778
+
+map_frame: map
+map_position:
+  x: -96.782
+  y: 101.302
+  z: 14.407
+```
+
+---
+
+## ROS2 Topics
+
+### Subscribe
+
+| Topic                                                                           | Type                         | Description |
+| ------------------------------------------------------------------------------- | ---------------------------- | ----------- |
+| `/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image`       | `sensor_msgs/msg/Image`      | UAV 카메라 영상  |
+| `/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 카메라 내부 파라미터 |
+| `/mission_state`                                                                | `std_msgs/msg/Int32`         | 미션 상태       |
+
+### Publish
+
+| Topic                          | Type                            | Description          |
+| ------------------------------ | ------------------------------- | -------------------- |
+| `/aruco/marker_id`             | `std_msgs/msg/Int32`            | 검출된 ArUco Marker ID  |
+| `/aruco/marker_pose`           | `geometry_msgs/msg/PoseStamped` | 카메라 기준 marker pose   |
+| `/aruco/marker_pose_map`       | `geometry_msgs/msg/PoseStamped` | map 기준 marker pose   |
+| `/offboard_control/image_proc` | `sensor_msgs/msg/Image`         | ArUco 검출 결과가 표시된 이미지 |
+
+---
+
+## Coordinate Flow
+
+ArUco Marker 좌표 생성 흐름은 다음과 같다.
+
+```text
+UAV Camera Image
+        ↓
+OpenCV ArUco Detection
+        ↓
+Marker ID / Corner 검출
+        ↓
+estimatePoseSingleMarkers()
+        ↓
+Camera 기준 Pose 계산
+        ↓
+/aruco/marker_pose 발행
+        ↓
+TF 변환
+x500_gimbal_0/camera_link → map
+        ↓
+/aruco/marker_pose_map 발행
+        ↓
+marker_detections.csv 저장
+```
+
+---
+
+## TF 구조
+
+현재 TF는 다음 구조를 기준으로 사용한다.
+
+```text
+map
+└── x500_gimbal_0/base_link
+    └── x500_gimbal_0/camera_link
+```
+
+ArUco Detector의 `camera_frame_id`는 아래 frame으로 맞춘다.
+
+```text
+x500_gimbal_0/camera_link
+```
+
+TF 확인 명령:
 
 ```bash
-ros2 run ros_gz_bridge parameter_bridge \
-  "/model/X1_asp/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist" \
-  --ros-args -r /model/X1_asp/cmd_vel:=/command/twist
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/camera_link
 ```
 
-이 구조에서는 UAV와 UGV가 같은 `/command/twist`를 공유한다.
+---
 
-```text
-/command/twist
-  +- UAV offboard_control
-  +- UGV Gazebo DiffDrive
-```
+## 실행 순서
 
-따라서 UGV keyboard 입력이 UAV offboard control로 전달될 수 있고, UAV 명령과 UGV 명령이 섞일 위험이 있다.
+총 6개 터미널을 사용한다.
 
-## 최종 수정 구조
+---
 
-UAV와 UGV 명령 토픽을 다음과 같이 분리했다.
-
-```text
-[UAV Control]
-keyboard_control_node
-  -> /command/twist
-  -> offboard_control
-  -> /fmu/in/trajectory_setpoint
-  -> x500_gimbal_0
-
-[UGV Control]
-ugv_keyboard_control_node
-  -> /command/ugv_cmd_vel
-  -> ros_gz_bridge
-  -> /model/X1_asp/cmd_vel
-  -> X1_asp
-```
-
-정리하면 다음과 같다.
-
-```text
-/command/twist       = UAV 전용
-/command/ugv_cmd_vel = UGV 전용
-```
-
-## 변경 사항
-
-| File | Type | Description |
-| --- | --- | --- |
-| `utilities_pkg/src/ugv_keyboard_control_node.cpp` | Added | UGV 전용 keyboard control node |
-| `utilities_pkg/CMakeLists.txt` | Modified | `ugv_keyboard_control_node` executable 및 install target 추가 |
-| `gazebo_env_setup/launch/ugv_bridge.launch.py` | Added | `/command/ugv_cmd_vel` -> `/model/X1_asp/cmd_vel` bridge |
-| `utilities_pkg/package.xml` | Modified | `std_msgs` dependency 반영 |
-| `gazebo_env_setup/package.xml` | Modified | `std_msgs`, `tf2_msgs` dependency 반영 |
-| `gazebo_env_setup/CMakeLists.txt` | Modified | `std_msgs`, `tf2_msgs` `find_package` 및 target dependency 반영 |
-
-## UGV Keyboard Node
-
-* Node name: `ugv_keyboard_control_node`
-* Publish topic: `/command/ugv_cmd_vel`
-* Message type: `geometry_msgs/msg/Twist`
-* Publish rate: 20 Hz
-* Control fields: `linear.x`, `angular.z`
-* Differential drive 차량이므로 `linear.y`는 사용하지 않음
-
-키 매핑은 다음과 같다.
-
-```text
-w : forward
-x : backward
-a : turn left
-d : turn right
-s or Space : stop
-h : help
-Ctrl+C : quit
-```
-
-## UGV Bridge
-
-* Launch file: `gazebo_env_setup/launch/ugv_bridge.launch.py`
-* ROS2 topic: `/command/ugv_cmd_vel`
-* Gazebo topic: `/model/X1_asp/cmd_vel`
-* Bridge direction: ROS2 -> Gazebo
-* Bridge expression:
-
-```text
-/model/X1_asp/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist
-```
-
-## 빌드 방법
+### Terminal 1 — PX4 / Gazebo 실행
 
 ```bash
-cd ~/ros2_ws
+cd ~/PX4-Autopilot
+make px4_sitl gz_x500_gimbal
+```
 
-source /opt/ros/humble/setup.bash
-source install/setup.bash 2>/dev/null || true
+Gazebo에서 `x500_gimbal_0` 모델이 실행되어야 한다.
 
-colcon build --packages-select utilities_pkg gazebo_env_setup
+---
 
+### Terminal 2 — TF / Pose Bridge 실행
+
+```bash
+cd ~/asp_project/asp_ws
 source install/setup.bash
-```
-
-성공 기준은 다음과 같다.
-
-```text
-Summary: 2 packages finished
-```
-
-## 실행 방법
-
-### UGV 실험
-
-Terminal 1: PX4/Gazebo 실행
-
-```bash
-cd ~/PX4-Autopilot_ASP
-make px4_sitl gz_x500_gimbal
-```
-
-Terminal 2: UGV bridge 실행
-
-```bash
-px4humble
-source ~/ros2_ws/install/setup.bash
-ros2 launch gazebo_env_setup ugv_bridge.launch.py
-```
-
-Terminal 3: UGV keyboard 실행
-
-```bash
-px4humble
-source ~/ros2_ws/install/setup.bash
-ros2 run utilities_pkg ugv_keyboard_control_node
-```
-
-Terminal 4: UGV command topic 확인
-
-```bash
-px4humble
-source ~/ros2_ws/install/setup.bash
-ros2 topic echo /command/ugv_cmd_vel
-```
-
-### UAV 실험
-
-Terminal 1: PX4/Gazebo 실행
-
-```bash
-cd ~/PX4-Autopilot_ASP
-make px4_sitl gz_x500_gimbal
-```
-
-Terminal 2: QGroundControl 실행
-
-```bash
-chmod +x QGroundControl.AppImage
-./QGroundControl.AppImage
-```
-
-Terminal 3: UAV interface 실행
-
-```bash
-px4humble
-source ~/ros2_ws/install/setup.bash
 ros2 launch gazebo_env_setup turn_interfaces.launch.py
 ```
 
-Terminal 4: UAV keyboard 실행
+이 launch는 Gazebo pose 정보를 ROS2 TF로 변환한다.
+
+확인해야 하는 TF:
 
 ```bash
-px4humble
-source ~/ros2_ws/install/setup.bash
-ros2 run utilities_pkg keyboard_control_node
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/camera_link
 ```
 
-## 검증 방법
+---
 
-UGV topic을 확인한다.
-
-```bash
-ros2 topic list | grep ugv
-```
-
-UAV command topic을 확인한다.
+### Terminal 3 — Camera Bridge 실행
 
 ```bash
-ros2 topic list | grep /command/twist
-```
+source /opt/ros/humble/setup.bash
 
-UGV keyboard만 눌렀을 때 다음 topic에는 값이 나와야 한다.
-
-```bash
-ros2 topic echo /command/ugv_cmd_vel
-```
-
-반대로 다음 topic에는 값이 나오지 않아야 한다.
-
-```bash
-ros2 topic echo /command/twist
-```
-
-이 결과가 확인되면 UGV keyboard control이 UAV용 `/command/twist`와 분리되어 동작하는 것이다.
-
-## 사용 금지 명령
-
-다음 임시 bridge 명령은 더 이상 사용하지 않는다.
-
-```bash
 ros2 run ros_gz_bridge parameter_bridge \
-  "/model/X1_asp/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist" \
-  --ros-args -r /model/X1_asp/cmd_vel:=/command/twist
+  /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image@sensor_msgs/msg/Image@gz.msgs.Image \
+  /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo
 ```
 
-이 명령은 `/command/twist`가 UAV와 UGV에 동시에 연결되어 명령이 섞일 수 있으므로 사용하지 않는다.
+카메라 토픽 publisher 확인:
+
+```bash
+ros2 topic info /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+```
+
+정상 출력 예시:
+
+```text
+Publisher count: 1
+```
+
+---
+
+### Terminal 4 — ArUco Detector 실행
+
+```bash
+cd ~/asp_project/asp_ws
+source install/setup.bash
+ros2 launch uav_aruco_detector aruco_detector.launch.py
+```
+
+---
+
+### Terminal 5 — Mission State 설정
+
+ArUco Detector가 mission state 조건을 사용할 경우 다음 명령을 실행한다.
+
+```bash
+cd ~/asp_project/asp_ws
+source install/setup.bash
+ros2 topic pub /mission_state std_msgs/msg/Int32 "{data: 1}"
+```
+
+`mission_state = 1`은 Precision Landing 또는 Marker Detection 활성 상태로 사용한다.
+
+---
+
+### Terminal 6 — 카메라 화면 확인
+
+```bash
+ros2 run rqt_image_view rqt_image_view
+```
+
+선택할 카메라 토픽:
+
+```text
+/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+```
+
+ArUco 검출 처리 이미지가 발행되는 경우 아래 토픽도 확인할 수 있다.
+
+```text
+/offboard_control/image_proc
+```
+
+---
+
+## 결과 확인
+
+마커가 카메라 화면에 보이는 상태에서 다음 명령으로 결과를 확인한다.
+
+### Marker ID 확인
+
+```bash
+ros2 topic echo /aruco/marker_id --once
+```
+
+예시:
+
+```yaml
+data: 0
+```
+
+---
+
+### Camera 기준 Pose 확인
+
+```bash
+ros2 topic echo /aruco/marker_pose --once
+```
+
+예시:
+
+```yaml
+header:
+  frame_id: x500_gimbal_0/camera_link
+pose:
+  position:
+    x: -4.026
+    y: 1.054
+    z: -1.778
+```
+
+---
+
+### Map 기준 Pose 확인
+
+```bash
+ros2 topic echo /aruco/marker_pose_map --once
+```
+
+예시:
+
+```yaml
+header:
+  frame_id: map
+pose:
+  position:
+    x: -96.782
+    y: 101.302
+    z: 14.407
+```
+
+---
+
+## CSV 저장 결과
+
+검출 결과는 CSV로 저장된다.
+
+CSV 형식:
+
+```csv
+time_sec,marker_id,camera_frame,camera_x,camera_y,camera_z,map_frame,map_x,map_y,map_z
+```
+
+예시:
+
+```csv
+1.78041e+09,0,x500_gimbal_0/camera_link,-4.02607,1.05398,-1.77837,map,-96.7816,101.302,14.4069
+```
+
+의미:
+
+```text
+marker_id = 0
+
+camera 기준 좌표:
+x = -4.02607
+y =  1.05398
+z = -1.77837
+
+map 기준 좌표:
+x = -96.7816
+y = 101.302
+z = 14.4069
+```
+
+CSV 확인 명령:
+
+```bash
+cd ~/asp_project/asp_ws
+find . -name "marker_detections.csv"
+cat <찾은_경로>
+```
+
+---
+
+## Troubleshooting
+
+### 1. `/aruco/marker_pose`는 나오는데 `/aruco/marker_pose_map`이 안 나오는 경우
+
+TF frame이 맞지 않을 가능성이 높다.
+
+확인:
+
+```bash
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/camera_link
+```
+
+또한 `/aruco/marker_pose`의 frame이 아래처럼 나와야 한다.
+
+```text
+x500_gimbal_0/camera_link
+```
+
+만약 아래처럼 나오면 map 변환이 실패할 수 있다.
+
+```text
+x500_gimbal_0/camera_link/camera
+```
+
+---
+
+### 2. Extrapolation into the past 오류
+
+예시 오류:
+
+```text
+Lookup would require extrapolation into the past
+```
+
+원인:
+
+```text
+camera image stamp와 TF stamp의 시간 기준이 다름
+```
+
+해결:
+
+```text
+marker pose의 header.stamp를 image stamp 대신 현재 ROS 시간 this->now()로 설정
+```
+
+---
+
+### 3. rqt_image_view에서 카메라 화면이 안 나오는 경우
+
+카메라 bridge가 켜져 있는지 확인한다.
+
+```bash
+ros2 topic info /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+```
+
+정상:
+
+```text
+Publisher count: 1
+```
+
+`Publisher count: 0`이면 Camera Bridge를 다시 실행한다.
+
+---
+
+## 최종 성공 기준
+
+아래 네 가지가 모두 확인되면 ArUco Detection 파트 완료이다.
+
+```text
+1. /aruco/marker_id 출력 성공
+2. /aruco/marker_pose 출력 성공
+3. /aruco/marker_pose_map 출력 성공
+4. marker_detections.csv 저장 성공
+```
+
+현재 테스트 결과:
+
+```text
+Marker ID 검출: 성공
+Camera 기준 좌표 생성: 성공
+Map 기준 좌표 변환: 성공
+CSV 저장: 성공
+```
+
+---
+
+## 팀원 공유용 요약
+
+```text
+ArUco Marker Detection 정상 동작 확인했습니다.
+
+현재 UAV 카메라 영상에서 marker ID를 검출하고,
+/aruco/marker_id,
+/aruco/marker_pose,
+/aruco/marker_pose_map
+토픽으로 발행됩니다.
+
+확인된 예시:
+marker_id: 0
+camera_frame: x500_gimbal_0/camera_link
+camera_position: x=-4.026, y=1.054, z=-1.778
+map_frame: map
+map_position: x=-96.782, y=101.302, z=14.407
+
+검출 결과는 marker_detections.csv에도 저장됩니다.
+```
+
+---
+
+## 발표용 설명
+
+본인은 Mission 2의 UAV Exploration 단계에서 ArUco Marker Detection을 담당하였다.
+UAV 카메라 영상에서 ArUco Marker를 검출하고, marker ID와 pose를 계산하였다.
+계산된 pose는 카메라 기준 좌표로 `/aruco/marker_pose`에 발행하고, TF를 이용해 map 기준 좌표로 변환하여 `/aruco/marker_pose_map`에 발행하였다.
+또한 검출된 marker ID와 위치 좌표를 CSV 파일로 저장하여 탐색 결과로 활용할 수 있도록 구현하였다.
+
+```
+```
