@@ -13,6 +13,9 @@ class MissionState(str, Enum):
     MISSION2_TRIGGERED = 'MISSION2_TRIGGERED'
     UAV_TAKEOFF_READY = 'UAV_TAKEOFF_READY'
     UAV_TAKEOFF_REQUESTED = 'UAV_TAKEOFF_REQUESTED'
+    UAV_EXPLORATION_READY = 'UAV_EXPLORATION_READY'
+    UAV_EXPLORATION_RUNNING = 'UAV_EXPLORATION_RUNNING'
+    UAV_EXPLORATION_COMPLETE = 'UAV_EXPLORATION_COMPLETE'
 
 
 class MissionManagerNode(Node):
@@ -34,6 +37,9 @@ class MissionManagerNode(Node):
                 ('mission2_trigger_topic', '/mission/mission2_trigger'),
                 ('command_takeoff_topic', '/command/takeoff'),
                 ('auto_publish_takeoff', False),
+                ('uav_exploration_start_topic', '/uav/exploration_start'),
+                ('uav_exploration_complete_topic', '/mission/uav_exploration_complete'),
+                ('auto_start_exploration', False),
                 ('required_mission2_event', 'MISSION2_START_REACHED'),
             ],
         )
@@ -42,6 +48,7 @@ class MissionManagerNode(Node):
         self.publish_rate_hz = max(0.1, float(self.get_parameter('publish_rate_hz').value))
         self.required_mission2_event = self.get_parameter('required_mission2_event').value
         self.auto_publish_takeoff = self.get_parameter('auto_publish_takeoff').value
+        self.auto_start_exploration = self.get_parameter('auto_start_exploration').value
 
         self.state = MissionState.INIT
         self.ugv_state = ''
@@ -49,6 +56,8 @@ class MissionManagerNode(Node):
         self.mission2_trigger_published = False
         self.perception_trigger_seen = False
         self.takeoff_requested = False
+        self.exploration_start_published = False
+        self.uav_exploration_complete = False
 
         self.state_pub = self.create_publisher(
             String, self.get_parameter('mission_state_topic').value, 10)
@@ -58,6 +67,8 @@ class MissionManagerNode(Node):
             Bool, self.get_parameter('mission2_trigger_topic').value, 10)
         self.takeoff_pub = self.create_publisher(
             Bool, self.get_parameter('command_takeoff_topic').value, 10)
+        self.exploration_start_pub = self.create_publisher(
+            Bool, self.get_parameter('uav_exploration_start_topic').value, 10)
 
         self.create_subscription(
             Bool, self.get_parameter('mission_start_topic').value,
@@ -74,6 +85,9 @@ class MissionManagerNode(Node):
         self.create_subscription(
             Bool, self.get_parameter('perception_trigger_topic').value,
             self.perception_trigger_callback, 10)
+        self.create_subscription(
+            Bool, self.get_parameter('uav_exploration_complete_topic').value,
+            self.uav_exploration_complete_callback, 10)
 
         period = 1.0 / self.publish_rate_hz
         self.timer = self.create_timer(period, self.timer_callback)
@@ -93,6 +107,8 @@ class MissionManagerNode(Node):
         self.mission2_trigger_published = False
         self.perception_trigger_seen = False
         self.takeoff_requested = False
+        self.exploration_start_published = False
+        self.uav_exploration_complete = False
         self.publish_mission2_trigger(False)
         self.transition_to(MissionState.READY, 'mission/reset true')
 
@@ -116,6 +132,13 @@ class MissionManagerNode(Node):
             self.get_logger().info(
                 'Perception Mission2 trigger seen; FSM waits for UGV position event.')
 
+    def uav_exploration_complete_callback(self, msg: Bool):
+        if msg.data:
+            self.uav_exploration_complete = True
+            self.transition_to(
+                MissionState.UAV_EXPLORATION_COMPLETE,
+                'mission/uav_exploration_complete true')
+
     def timer_callback(self):
         if self.state == MissionState.INIT:
             self.transition_to(MissionState.READY, 'initial timer')
@@ -134,6 +157,17 @@ class MissionManagerNode(Node):
             self.takeoff_requested = True
             self.transition_to(MissionState.UAV_TAKEOFF_REQUESTED, 'auto_publish_takeoff')
 
+        if (
+            self.state == MissionState.UAV_EXPLORATION_READY
+            and self.auto_start_exploration
+            and not self.exploration_start_published
+        ):
+            msg = Bool()
+            msg.data = True
+            self.exploration_start_pub.publish(msg)
+            self.exploration_start_published = True
+            self.transition_to(MissionState.UAV_EXPLORATION_RUNNING, 'auto_start_exploration')
+
         self.publish_state()
         self.publish_status()
 
@@ -146,6 +180,8 @@ class MissionManagerNode(Node):
 
         self.publish_state()
         self.transition_to(MissionState.UAV_TAKEOFF_READY, 'mission2 trigger complete')
+        if not self.auto_publish_takeoff:
+            self.transition_to(MissionState.UAV_EXPLORATION_READY, 'manual takeoff/exploration gate')
 
     def transition_to(self, next_state: MissionState, reason: str):
         if self.state == next_state:
@@ -173,6 +209,8 @@ class MissionManagerNode(Node):
             'last_ugv_event': self.last_ugv_event,
             'mission2_trigger_published': self.mission2_trigger_published,
             'perception_trigger_seen': self.perception_trigger_seen,
+            'exploration_start_published': self.exploration_start_published,
+            'uav_exploration_complete': self.uav_exploration_complete,
         })
         self.status_pub.publish(msg)
 

@@ -18,4 +18,8 @@ mission_manager_node:
     command_takeoff_topic: "/command/takeoff"
     auto_publish_takeoff: false
 
+    uav_exploration_start_topic: "/uav/exploration_start"
+    uav_exploration_complete_topic: "/mission/uav_exploration_complete"
+    auto_start_exploration: false
+
     required_mission2_event: "MISSION2_START_REACHED"

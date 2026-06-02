@@ -42,11 +42,11 @@ UGV keyboard와 자동 주행이 같은 ROS2 command path를 공유해야 bridge
 
 ```csv
 x,y,mission_type,target_speed
--120.36,36.04,1,0.5
--122.00,39.00,1,0.5
--124.00,42.00,1,0.5
--126.00,45.00,1,0.4
--127.50,47.00,2,0.0
+-120.36252764327848,36.03555436034368,1,0.5
+-126.12116513749258,46.650538629829526,1,0.5
+-131.5354213347476,61.829714929681145,2,0.0
+-129.23,69.36,3,0.5
+-120.85,73.20,3,0.5
 ```
 
 필드 의미:
@@ -58,7 +58,19 @@ mission_type 일반 waypoint는 1, Mission2 시작 정지 지점은 2
 target_speed 해당 waypoint로 이동할 때 사용할 목표 속도
 ```
 
-초기 waypoint는 `X1_asp` 시작 위치 근처의 테스트용 좌표이다. 실제 Gazebo 시작 위치가 다르면 측정한 `map -> X1_asp/base_link` 좌표로 교체해야 한다.
+현재 `path/mission.csv`는 원본 CSV
+`/home/subin/Autonomous-System-Platform-final-project/ugv_controller/path/mission.csv`를
+이 패키지의 `x,y,mission_type,target_speed` 형식으로 변환한 것이다.
+
+변환 규칙:
+
+* 원본 `x,y` 좌표를 map frame waypoint로 유지했다.
+* 원본 `mission_type` 값을 유지했다.
+* `mission_type=2` waypoint는 Mission2 시작 정지 지점으로 사용하므로 `target_speed=0.0`으로 설정했다.
+* 그 외 waypoint는 저속 검증을 위해 `target_speed=0.5`로 설정했다.
+
+실제 Gazebo 시작 위치나 bridge/TF 기준이 달라지면 측정한 `map -> X1_asp/base_link` 좌표를 기준으로
+waypoint와 target speed를 다시 튜닝해야 한다.
 
 ## 7. 실행 명령
 

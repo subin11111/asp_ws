@@ -37,8 +37,27 @@ target_link_libraries(ugv_aruco_detector_node
   ${OpenCV_LIBS}
 )
 
+add_executable(uav_aruco_detector_node src/uav_aruco_detector_node.cpp)
+ament_target_dependencies(
+  uav_aruco_detector_node
+  rclcpp
+  sensor_msgs
+  std_msgs
+  geometry_msgs
+  visualization_msgs
+  cv_bridge
+  image_transport
+  tf2_ros
+  tf2_geometry_msgs
+  ament_index_cpp
+)
+target_link_libraries(uav_aruco_detector_node
+  ${OpenCV_LIBS}
+)
+
 install(TARGETS
   ugv_aruco_detector_node
+  uav_aruco_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,22 @@
+uav_aruco_detector_node:
+  ros__parameters:
+    image_topic: "/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image"
+    camera_info_topic: "/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info"
+
+    annotated_image_topic: "/perception/uav/aruco/annotated"
+    marker_id_topic: "/perception/uav/marker_id"
+    marker_detections_topic: "/perception/uav/marker_detections"
+    marker_map_points_topic: "/perception/uav/marker_map_points"
+
+    map_frame: "map"
+    camera_frame: "x500_gimbal_0/camera_link"
+
+    dictionary: "DICT_4X4_50"
+    marker_size_m: 0.5
+
+    publish_debug_image: true
+    write_csv: true
+    csv_path: "/home/subin/ros2_ws/mission_logs/uav_marker_detections.csv"
+
+    duplicate_suppression_distance_m: 0.5
+    duplicate_suppression_time_sec: 2.0

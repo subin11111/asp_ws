@@ -1,0 +1,32 @@
+uav_exploration_node:
+  ros__parameters:
+    path_csv: ""
+
+    map_frame: "map"
+    base_frame: "x500_gimbal_0/base_link"
+
+    command_pose_topic: "/command/pose"
+    gimbal_pitch_topic: "/gimbal_pitch_degree"
+
+    mission_state_topic: "/mission/state"
+    exploration_start_topic: "/uav/exploration_start"
+    exploration_state_topic: "/uav/exploration_state"
+    exploration_event_topic: "/uav/exploration_event"
+    exploration_complete_topic: "/mission/uav_exploration_complete"
+
+    marker_detections_topic: "/perception/uav/marker_detections"
+
+    start_on_launch: false
+    start_on_mission_state: true
+    required_start_state: "UAV_EXPLORATION_READY"
+
+    pose_publish_rate_hz: 10.0
+    waypoint_tolerance: 1.0
+    yaw_tolerance_deg: 20.0
+    default_hold_sec: 3.0
+
+    complete_on_path_done: true
+    minimum_unique_markers: 0
+    exploration_timeout_sec: 300.0
+
+    resend_current_pose_before_start: false

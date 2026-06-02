@@ -539,3 +539,113 @@ ros2 topic pub --once /ugv/mission_event std_msgs/msg/String "{data: MISSION2_ST
 ```
 
 기존 UAV/UGV 제어 코드, keyboard node, bridge launch, PX4/default.sdf는 수정하지 않았다.
+
+## 변경 기록: Mission2 이후 UAV Exploration 준비
+
+작성 시각: `2026-06-03 02:33:00 KST`
+
+Mission1 UGV path follower와 mission manager를 확장하여 Mission1 종료 이후 Mission2 준비 상태와 UAV exploration 준비 흐름을 연결했다. 현재까지 확인된 안정 동작 범위는 다음과 같다.
+
+```text
+Mission1 UGV waypoint 주행
+  -> mission_type=2 waypoint 도착
+  -> /ugv/mission_event: MISSION2_START_REACHED
+  -> mission_manager_node
+  -> /mission/mission2_trigger: true
+  -> /mission/state: UAV_TAKEOFF_READY
+  -> Mission2 준비 이륙 동작
+```
+
+아래 화면은 Mission1 이후 Mission2 준비 단계에서 UGV 근처에 UAV가 이륙해 있는 Gazebo 확인 화면이다.
+
+![Mission1 이후 Mission2 준비 이륙 확인](docs/images/mission1_takeoff_ready_2026-06-03.png)
+
+이번 변경으로 `asp_mission_manager` FSM에 UAV exploration 준비 상태를 추가했다.
+
+```text
+UAV_EXPLORATION_READY
+UAV_EXPLORATION_RUNNING
+UAV_EXPLORATION_COMPLETE
+```
+
+Mission manager는 `/mission/state`와 `/uav/exploration_start`를 통해 `asp_uav_control`의 exploration node와 연결된다. UAV exploration node는 launch만으로 UAV를 움직이지 않도록 구성했다.
+
+```text
+start_on_launch: false
+start_on_mission_state: true
+required_start_state: UAV_EXPLORATION_READY
+```
+
+따라서 `/mission/state`가 `UAV_EXPLORATION_READY`가 되거나, 수동으로 `/uav/exploration_start true`가 publish될 때만 `/command/pose` waypoint 명령을 publish한다. IDLE 상태에서는 `/command/pose`를 publish하지 않는다.
+
+새 패키지 `asp_uav_control`을 추가했다.
+
+```text
+src/asp_uav_control/
+├── asp_uav_control/uav_exploration_node.py
+├── config/uav_exploration_params.yaml
+├── docs/MISSION4_UAV_EXPLORATION.md
+├── launch/uav_exploration.launch.py
+└── path/uav_path.csv
+```
+
+UAV exploration node의 주요 topic은 다음과 같다.
+
+```text
+Subscriptions:
+/mission/state
+/uav/exploration_start
+/perception/uav/marker_detections
+
+Publishers:
+/command/pose
+/gimbal_pitch_degree
+/uav/exploration_state
+/uav/exploration_event
+/mission/uav_exploration_complete
+```
+
+UGV와 UAV waypoint CSV도 현재 패키지 형식에 맞게 정리했다.
+
+```text
+UGV 원본 CSV:
+/home/subin/Autonomous-System-Platform-final-project/ugv_controller/path/mission.csv
+
+현재 UGV CSV:
+src/asp_ugv_control/path/mission.csv
+format: x,y,mission_type,target_speed
+
+UAV 원본 CSV:
+/home/subin/Autonomous-System-Platform-final-project/uav_controller/path/uav_path.csv
+
+현재 UAV CSV:
+src/asp_uav_control/path/uav_path.csv
+format: x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag
+```
+
+다만 현재 waypoint CSV는 우리 Gazebo map과 완전히 맞는 좌표로 검증된 상태가 아니다. 따라서 다음 단계에서 실제 `map -> X1_asp/base_link`, `map -> x500_gimbal_0/base_link` TF와 marker 배치 기준으로 UGV/UAV waypoint를 다시 측정하고 보정해야 한다.
+
+`asp_perception`에는 UAV ArUco detector node도 추가했다.
+
+```text
+src/asp_perception/src/uav_aruco_detector_node.cpp
+src/asp_perception/launch/uav_aruco_detector.launch.py
+src/asp_perception/config/uav_aruco_detector_params.yaml
+src/asp_perception/docs/UAV_ARUCO_DETECTOR.md
+```
+
+UAV ArUco detector는 UAV camera image와 camera_info를 구독하고 `/perception/uav/marker_*` 계열 topic을 publish하도록 구성했다. 다만 아직 실제 Gazebo 실행에서 ArUco marker detection node가 정상 검출되는지는 확인하지 못했다. 현재 확인 완료 범위는 Mission1 이후 Mission2 준비 및 이륙 동작까지이다.
+
+RViz의 Marker Detected display topic은 UAV perception 결과 확인을 위해 다음 topic으로 맞췄다.
+
+```text
+/perception/uav/aruco/annotated
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select asp_uav_control asp_ugv_control asp_mission_manager asp_perception gazebo_env_setup
+```
+
+추가로 `mission_logs/`는 runtime detection log가 생성되는 위치이므로 `.gitignore`에 포함했다.
