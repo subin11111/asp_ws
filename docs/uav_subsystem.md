@@ -1,148 +1,145 @@
 # 🚁 UAV Subsystem
 
-UAV Subsystem은 드론의 자율 탐색, ArUco Marker 검출 및 정밀 착륙 기능을 담당한다.
+## 📌 시스템 개요
 
-총 3개의 ROS2 노드로 구성되며, UAV 제어 명령은 `/command/twist` 토픽을 통해 PX4 Offboard Controller로 전달된다.
+UAV 서브시스템은 드론의 탐색 비행, ArUco 마커 검출, 그리고 정밀 착륙 기능을 담당한다.
+
+드론은 미리 정의된 waypoint를 따라 비행하며 UGV를 탐색한다. UAV 카메라에서 ArUco Marker가 검출되면 검출 노드가 마커 위치를 계산하여 발행하고, Precision Landing 노드가 이를 이용해 드론을 마커 중심으로 정렬한 후 착륙을 수행한다.
 
 ---
 
-# System Architecture
+## 📌 시스템 아키텍처
 
 ```mermaid
-graph LR
+graph TD
 
-    Camera["/uav/camera/image_raw"]
-    PX4["PX4 SITL"]
+    PX4([🚁 PX4 + Gazebo])
 
-    Aruco["👁️ ArUco Detector\n(이승윤)"]
-    Waypoint["🚁 UAV Waypoint Follower\n(박재형)"]
-    Landing["🎯 Precision Landing\n(이예림)"]
+    WP([🛰️ Waypoint Following<br/>박재형])
+    DET([👁️ ArUco Detection<br/>이승윤])
+    LAND([🎯 Precision Landing<br/>이예림])
 
-    Offboard["⚙️ Offboard Control"]
+    PX4 -->|Camera Image| DET
+    PX4 -->|Vehicle State| WP
 
-    Camera --> Aruco
+    DET -->|/aruco/marker_pose_map| LAND
 
-    PX4 -->|Vehicle Position| Waypoint
-    PX4 -->|Vehicle Position| Landing
+    WP -->|/mission_state| DET
+    WP -->|/mission_state| LAND
 
-    Waypoint -->|/mission_state| Aruco
-    Waypoint -->|/mission_state| Landing
-
-    Aruco -->|/aruco/marker_pose| Landing
-
-    Waypoint -->|/command/twist| Offboard
-    Landing -->|/command/twist| Offboard
-
-    Offboard -->|TrajectorySetpoint| PX4
+    LAND -->|/command/twist| PX4
+    WP -->|Waypoint Setpoint| PX4
 ```
 
 ---
 
-# Node Specification
+## 💻 담당자별 통신 명세
 
-## 👁️ ArUco Detector (이승윤)
+### 1. 이승윤 - ArUco Marker Detection (`uav_aruco_detector`)
 
-### Description
+#### Subscribe
 
-UAV 카메라 영상을 이용하여 ArUco Marker를 검출하고 위치를 계산한다.
+| Topic                   | Type                |
+| ----------------------- | ------------------- |
+| `/uav/camera/image_raw` | `sensor_msgs/Image` |
+| `/mission_state`        | `std_msgs/Int32`    |
 
-### Subscribe
+#### Publish
 
-| Topic                 | Type                  |
-| --------------------- | --------------------- |
-| /uav/camera/image_raw | sensor_msgs/msg/Image |
-| /mission_state        | std_msgs/msg/Int32    |
+| Topic                    | Type                        |
+| ------------------------ | --------------------------- |
+| `/aruco/marker_id`       | `std_msgs/Int32`            |
+| `/aruco/marker_pose`     | `geometry_msgs/PoseStamped` |
+| `/aruco/marker_pose_map` | `geometry_msgs/PoseStamped` |
 
-### Publish
+#### 역할
 
-| Topic              | Type                          |
-| ------------------ | ----------------------------- |
-| /aruco/marker_pose | geometry_msgs/msg/PoseStamped |
-
----
-
-## 🚁 UAV Waypoint Follower (박재형)
-
-### Description
-
-Waypoint 기반 자율 비행을 수행하며 탐색 완료 후 Precision Landing 단계로 전환한다.
-
-### Subscribe
-
-| Topic            | Type               |
-| ---------------- | ------------------ |
-| Vehicle Position | PX4 Local Position |
-
-### Publish
-
-| Topic          | Type                    |
-| -------------- | ----------------------- |
-| /command/twist | geometry_msgs/msg/Twist |
-| /mission_state | std_msgs/msg/Int32      |
+* UAV 카메라 영상 수신
+* ArUco Marker 검출
+* Marker ID 추출
+* Marker 위치 계산
+* Marker 위치를 map frame 기준으로 변환 후 발행
 
 ---
 
-## 🎯 Precision Landing (이예림)
+### 2. 박재형 - PX4 Waypoint Following (`uav_waypoint_follower`)
 
-### Description
+#### Subscribe
 
-ArUco Marker의 상대 위치를 이용하여 UAV를 마커 중심으로 유도하고 정밀 착륙을 수행한다.
+| Topic              | Type                        |
+| ------------------ | --------------------------- |
+| UAV Local Position | `geometry_msgs/PoseStamped` |
 
-### Subscribe
+#### Publish
 
-| Topic              | Type                          |
-| ------------------ | ----------------------------- |
-| /aruco/marker_pose | geometry_msgs/msg/PoseStamped |
-| /mission_state     | std_msgs/msg/Int32            |
-| Vehicle Position   | PX4 Local Position            |
+| Topic             | Type                 |
+| ----------------- | -------------------- |
+| Waypoint Setpoint | PX4 Offboard Message |
+| `/mission_state`  | `std_msgs/Int32`     |
 
-### Publish
+#### 역할
 
-| Topic          | Type                    |
-| -------------- | ----------------------- |
-| /command/twist | geometry_msgs/msg/Twist |
-
----
-
-# Mission State
-
-| State | Description       |
-| ----- | ----------------- |
-| 0     | Exploration       |
-| 1     | Precision Landing |
+* Waypoint 기반 탐색 비행
+* 미션 상태 관리
+* PX4 Offboard 제어
 
 ---
 
-# Control Ownership
+### 3. 이예림 - Precision Landing (`uav_precision_landing`)
+
+#### Subscribe
+
+| Topic                    | Type                        |
+| ------------------------ | --------------------------- |
+| `/aruco/marker_pose_map` | `geometry_msgs/PoseStamped` |
+| `/mission_state`         | `std_msgs/Int32`            |
+
+#### Publish
+
+| Topic            | Type                  |
+| ---------------- | --------------------- |
+| `/command/twist` | `geometry_msgs/Twist` |
+
+#### 역할
+
+* ArUco Marker 위치 수신
+* Marker 중심 정렬
+* 정렬 오차 계산
+* 착륙 제어 명령 생성
+* 정밀 착륙 수행
+
+---
+
+## 📌 UAV 미션 시퀀스
 
 ```text
-mission_state = 0
-→ UAV Waypoint Follower 활성
-→ Precision Landing 비활성
+1. Waypoint Following 시작
 
-mission_state = 1
-→ Precision Landing 활성
-→ UAV Waypoint Follower 비활성
-```
+        ↓
 
-동일한 `/command/twist` 토픽을 사용하므로 두 노드가 동시에 명령을 발행하지 않는다.
+2. UAV 탐색 비행
 
----
+        ↓
 
-# UAV Control Flow
+3. ArUco Marker 검출
 
-```text
-ArUco Detector
-      ↓
-/aruco/marker_pose
-      ↓
-Precision Landing
-      ↓
-/command/twist
-      ↓
-Offboard Control
-      ↓
-PX4 SITL
-      ↓
-UAV
+        ↓
+
+4. /aruco/marker_pose_map 발행
+
+        ↓
+
+5. Precision Landing 시작
+
+        ↓
+
+6. Marker 중심 정렬
+
+        ↓
+
+7. 하강
+
+        ↓
+
+8. 정밀 착륙 완료
 ```
