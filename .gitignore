@@ -25,3 +25,9 @@ Thumbs.db
 uav_wp.csv
 ugv_wp.csv
 *_wp.csv
+
+# ROS build/runtime
+build/
+install/
+log/
+aruco_log/
