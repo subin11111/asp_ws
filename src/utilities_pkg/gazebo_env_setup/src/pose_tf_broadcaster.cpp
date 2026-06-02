@@ -15,17 +15,20 @@ public:
   {
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    // 세 개의 pose_static 토픽 구독
-    sub_x1_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
-      "/model/X1_asp/pose_static", 10,
+    sub_x1_dynamic_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
+      "/model/X1_asp/pose", 10,
       std::bind(&PoseTFBroadcaster::pose_callback, this, std::placeholders::_1));
 
-    sub_x500_static_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
-      "/model/x500_gimbal_0/pose_static", 10,
+    sub_x1_static_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
+      "/model/X1_asp/pose_static", 10,
       std::bind(&PoseTFBroadcaster::pose_callback, this, std::placeholders::_1));
 
     sub_x500_dynamic_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
       "/model/x500_gimbal_0/pose", 10,
+      std::bind(&PoseTFBroadcaster::pose_callback, this, std::placeholders::_1));
+
+    sub_x500_static_ = this->create_subscription<tf2_msgs::msg::TFMessage>(
+      "/model/x500_gimbal_0/pose_static", 10,
       std::bind(&PoseTFBroadcaster::pose_callback, this, std::placeholders::_1));
   }
 
@@ -39,20 +42,14 @@ private:
         transform.header.frame_id = "map";
       }
 
-      // 2. 부모/자식 프레임 처리 (A/B -> B)
-    //   std::string full_child = transform.child_frame_id;
-    //   size_t slash_pos = full_child.rfind('/');
-    //   if (slash_pos != std::string::npos) {
-    //     transform.child_frame_id = full_child.substr(slash_pos + 1);
-    //   }
-
-      // 3. TF 퍼블리시
+      // 2. child_frame_id는 Gazebo 모델명/링크명 그대로 유지한다.
       tf_broadcaster_->sendTransform(transform);
     }
   }
 
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_x1_;
+  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_x1_dynamic_;
+  rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_x1_static_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_x500_static_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_x500_dynamic_;
 };

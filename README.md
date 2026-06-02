@@ -277,3 +277,64 @@ colcon build --packages-select gazebo_env_setup
 ```
 
 제어 코드, keyboard node, UGV bridge, PX4 파일은 수정하지 않았다.
+
+## 변경 기록: Gazebo Pose TF Bridge 수정
+
+작성 시각: `2026-06-02 22:24:49 KST`
+
+RViz에서 camera image는 표시되지만 TF tree에 실제 모델 frame인 `X1_asp/base_link`, `x500_gimbal_0/base_link`가 보이지 않는 문제를 확인했다. 원인은 Gazebo의 pose topic이 ROS2로 bridge되지 않았고, `pose_tf_broadcaster`도 `bridge_and_tf.launch.py`에서 실행되지 않는 구조였기 때문이다.
+
+이번 수정에서는 `gazebo_env_setup/launch/bridge_and_tf.launch.py`에 다음 Gazebo pose topic bridge를 추가했다.
+
+```text
+/model/X1_asp/pose
+/model/X1_asp/pose_static
+/model/x500_gimbal_0/pose
+/model/x500_gimbal_0/pose_static
+```
+
+같은 launch 파일에서 `pose_tf_broadcaster` node도 함께 실행되도록 추가했다.
+
+```text
+gazebo_env_setup/pose_tf_broadcaster
+```
+
+기존 launch에 남아 있던 `x500_depth_0` 기준 static TF publisher들은 현재 모델명과 맞지 않아 제거했다. 현재 모델 기준은 다음과 같다.
+
+```text
+X1_asp
+x500_gimbal_0
+```
+
+`gazebo_env_setup/src/pose_tf_broadcaster.cpp`는 다음 topic을 모두 구독하도록 수정했다.
+
+```text
+/model/X1_asp/pose
+/model/X1_asp/pose_static
+/model/x500_gimbal_0/pose
+/model/x500_gimbal_0/pose_static
+```
+
+수신한 transform의 parent frame이 `default`이면 `map`으로 바꾸고, child frame은 Gazebo가 제공하는 이름을 그대로 유지한다. 따라서 RViz/tf2에서 다음 frame을 확인할 수 있어야 한다.
+
+```text
+map
+X1_asp/base_link
+x500_gimbal_0/base_link
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select gazebo_env_setup
+```
+
+실행 중인 `turn_interfaces.launch.py`는 재시작해야 새 pose bridge와 `pose_tf_broadcaster`가 적용된다.
+
+```bash
+ros2 launch gazebo_env_setup turn_interfaces.launch.py
+ros2 run tf2_ros tf2_echo map X1_asp/base_link
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
+```
+
+제어 코드, keyboard node, UGV bridge, image bridge topic, PX4/default.sdf는 수정하지 않았다.
