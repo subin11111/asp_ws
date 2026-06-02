@@ -1,4 +1,4 @@
-아래 그대로 복붙해서 `README.md`에 넣으면 돼.
+
 
 ````markdown
 # UAV ArUco Marker Detection
