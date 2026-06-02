@@ -1,6 +1,3 @@
-
-
-````markdown
 # UAV ArUco Marker Detection
 
 ## 담당자
@@ -62,9 +59,7 @@ map_position:
 | `/uav/camera/camera_info` | `sensor_msgs/msg/CameraInfo` | 카메라 내부 파라미터 |
 | `/mission_state` | `std_msgs/msg/Int32` | 미션 상태 |
 
-> 실제 Gazebo camera topic은 bridge 또는 remap을 통해 `/uav/camera/image_raw`, `/uav/camera/camera_info`로 연결해서 사용한다.
-
-실제 Gazebo camera topic:
+실제 Gazebo camera topic은 bridge 또는 remap을 통해 `/uav/camera/image_raw`, `/uav/camera/camera_info`로 연결해서 사용한다.
 
 | Gazebo Topic | Type |
 |---|---|
@@ -83,8 +78,6 @@ map_position:
 ---
 
 ## Coordinate Flow
-
-ArUco Marker 좌표 생성 흐름은 다음과 같다.
 
 ```text
 UAV Camera Image
@@ -642,11 +635,3 @@ map_position: x=-96.782, y=101.302, z=14.407
 
 ---
 
-## 발표용 설명
-
-본인은 Mission 2의 UAV Exploration 단계에서 ArUco Marker Detection을 담당하였다.  
-UAV 카메라 영상에서 ArUco Marker를 검출하고, marker ID와 pose를 계산하였다.  
-계산된 pose는 카메라 기준 좌표로 `/aruco/marker_pose`에 발행하고, TF를 이용해 map 기준 좌표로 변환하여 `/aruco/marker_pose_map`에 발행하였다.  
-또한 검출된 marker ID와 위치 좌표를 CSV 파일로 저장하여 탐색 결과로 활용할 수 있도록 구현하였다.  
-추가로 RViz의 `Marker Detected` 패널에서 검출된 마커 박스와 ID가 표시되도록 `/offboard_control/image_proc` 처리 이미지 토픽을 발행하였다.
-````
