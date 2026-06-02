@@ -11,16 +11,21 @@ aruco_detector:
 
     dictionary: "DICT_4X4_50"
 
-    # echo 로그에서 frame이 x500_gimbal_0/camera_link/camera로 나왔으므로 기본값을 맞춤
+    # 최종 TF에서 확인된 camera frame
+    # map -> x500_gimbal_0/base_link -> x500_gimbal_0/camera_link
     default_camera_frame_id: "x500_gimbal_0/camera_link"
 
     # map 좌표 변환 목표 frame
     target_frame: "map"
     publish_map_pose: true
 
+    # CSV 저장
     write_csv: true
     csv_file_path: ""
 
     # 기존 파일 방식과 유사한 좌표 변환 사용
     # ROS x = -OpenCV z, ROS y = OpenCV x, ROS z = -OpenCV y
     convert_opencv_to_ros: true
+
+    # RViz Marker Detected 패널용 처리 이미지 토픽
+    output_image_topic: "/offboard_control/image_proc"
