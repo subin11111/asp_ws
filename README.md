@@ -1,5 +1,4 @@
-업로드한 README 초안을 기준으로, **중복/깨진 코드블록 정리하고 Marker Detected + RViz 확인 결과까지 반영한 최종 README**로 다시 만들었어. 
-아래 전체를 `README.md`에 그대로 붙여넣으면 돼.
+
 
 ````markdown
 # UAV ArUco Marker Detection
