@@ -772,3 +772,134 @@ ros2 topic echo /command/pose
 ```
 
 runtime log가 저장되는 `mission_logs/`와 diagnostic log 디렉토리는 git에 포함하지 않도록 `.gitignore`에 정리했다.
+
+## 변경 기록: Mission2 PX4 Local Anchor 이륙 보정
+
+작성 시각: `2026-06-03 14:29:09 KST`
+
+Mission1 동안 UAV와 UGV가 함께 이동한 뒤 Mission2 시작 지점에서 UAV가 이륙할 때,
+UAV가 현재 위치에서 상승하지 않고 spawn/home 위치 계열로 돌아가는 문제가 반복되었다.
+이전 좌표계 보정은 `/command/pose`의 map ENU 좌표에서 Mission2 map origin만 빼서
+PX4 NED setpoint를 만들었다.
+
+```text
+target_map_enu - mission2_map_origin_enu
+  -> local_enu
+  -> ENU_TO_NED(local_enu)
+```
+
+이 방식에서는 첫 takeoff target이 Mission2 origin의 z만 올린 값일 때 최종 PX4 setpoint가
+다음처럼 된다.
+
+```text
+local_enu = (0, 0, +8)
+px4_ned   = (0, 0, -8)
+```
+
+하지만 PX4 `TrajectorySetpoint.position`은 PX4 local NED absolute setpoint이다.
+따라서 `(0, 0, -8)`은 현재 위치에서 8m 상승이 아니라 PX4 local origin의 x=0, y=0 지점에서
+z=-8로 해석될 수 있다. 이것이 UAV가 Mission2 지점이 아니라 spawn/home 위치 쪽으로
+돌아가는 핵심 원인으로 판단했다.
+
+이번 수정에서는 Mission2 origin latch 시점에 두 기준을 동시에 저장하도록 변경했다.
+
+```text
+mission2_map_anchor_enu = /uav/mission2_takeoff_origin
+mission2_px4_anchor_ned = /fmu/out/vehicle_local_position at latch time
+```
+
+이후 `/command/pose`가 들어오면 아래 변환을 사용한다.
+
+```text
+target_map_enu = /command/pose position
+delta_map_enu = target_map_enu - mission2_map_anchor_enu
+delta_ned = ENU_TO_NED(delta_map_enu)
+final_px4_setpoint_ned = mission2_px4_anchor_ned + delta_ned
+```
+
+예를 들어 Mission2 순간 PX4 local 위치가 `(64, -117, -1)`이고, map 기준으로 z만 8m
+올린 takeoff target이 들어오면 최종 setpoint는 `(64, -117, -9)`가 된다. 즉 x/y는
+Mission2 순간 PX4 local 위치를 유지하고 z만 상승한다.
+
+`offboard_control.cpp`의 주요 변경 사항은 다음과 같다.
+
+```text
+/fmu/out/vehicle_local_position subscribe 추가
+/uav/mission2_takeoff_origin transient_local/reliable subscribe 추가
+Mission2 map anchor와 PX4 local NED anchor 동시 저장
+/command/pose 수신 전 anchor가 없으면 pose reject
+target command가 없을 때 /fmu/in/trajectory_setpoint default zero publish 중지
+/debug/offboard/frame_report에 anchor, delta, final setpoint 상태 출력
+```
+
+UAV exploration node는 Mission2 시작 event를 기준으로 takeoff origin을 latch하고,
+첫 `/command/pose`가 반드시 Mission2 origin의 x/y를 유지한 채 z만 상승하도록 guard를
+추가했다.
+
+```text
+/ugv/mission_event: MISSION2_START_REACHED
+  -> map -> x500_gimbal_0/base_link TF latch
+  -> /uav/mission2_takeoff_origin publish
+  -> TAKEOFF_CLIMB
+  -> TAKEOFF_HOLD
+  -> TAKEOFF_COMPLETE
+  -> dynamic transition/path build
+  -> EXPLORING
+```
+
+Mission2 origin이 latch되지 않았을 때는 start signal이 들어와도
+`WAITING_FOR_MISSION2_ORIGIN` 상태에 머물고 `/command/pose`를 publish하지 않는다.
+takeoff 중 x/y가 Mission2 origin과 다르면 `POSE_BLOCKED_*` event로 차단한다.
+
+관련 파라미터는 다음과 같다.
+
+```yaml
+mission_event_topic: "/ugv/mission_event"
+mission2_start_event: "MISSION2_START_REACHED"
+mission2_takeoff_origin_topic: "/uav/mission2_takeoff_origin"
+use_mission2_latched_origin: true
+require_mission2_latched_origin: true
+force_takeoff_before_path: true
+takeoff_mode: "relative"
+takeoff_relative_height: 8.0
+takeoff_hold_sec: 3.0
+block_pose_if_not_latched: true
+block_pose_if_xy_not_origin: true
+```
+
+safe launch도 정리했다. `uav_exploration_safe.launch.py`는 정적 spawn prefix가 들어간
+`uav_path_safe.csv`를 런타임 경로로 사용하지 않고, `uav_path_generated.csv`를 scan waypoint
+후보로 읽는다. 실제 takeoff와 transition prefix는 Mission2 origin과 현재 TF 기준으로
+runtime에서 다시 만든다.
+
+보조 진단 스크립트도 추가했다.
+
+```text
+tools/diagnostics/uav_pose_source_audit.sh
+```
+
+이 스크립트는 `/command/pose` publisher, Mission2 origin, offboard debug pose,
+PX4 vehicle local position, trajectory setpoint를 한 번씩 수집하고, 정적 spawn/safe path
+참조도 함께 출력한다.
+
+문서와 설정은 다음 파일에 반영했다.
+
+```text
+src/asp_uav_control/docs/MISSION4_UAV_EXPLORATION.md
+src/asp_uav_control/config/uav_exploration_params.yaml
+src/asp_uav_control/launch/uav_exploration_safe.launch.py
+tools/diagnostics/uav_pose_source_audit.sh
+tools/path_tools/generate_takeoff_safe_csv.py
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+colcon build --packages-select px4_ros_com asp_uav_control
+```
+
+정상 출력:
+
+```text
+Summary: 2 packages finished
+```

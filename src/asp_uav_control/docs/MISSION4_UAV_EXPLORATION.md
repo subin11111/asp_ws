@@ -54,9 +54,140 @@ roof/wall 관측 waypoint 후보를 자동 생성한다.
 현재 전체 미션은 UAV가 UGV 위에 실려 Mission2 시작 지점까지 이동하는 구조이다. 따라서
 UAV exploration 시작 위치는 launch 시점이 아니라 Mission2 Trigger 시점이다.
 `uav_path.csv`는 전체 비행 경로가 아니라 marker scan waypoint 후보 목록으로 취급한다.
-`dynamic_safe_prefix: true`이면 `uav_exploration_node`가 start signal을 받은 순간
-`map -> x500_gimbal_0/base_link` TF를 읽고, runtime에서 `takeoff_climb`, `safe_altitude`,
-`transition_###` waypoint를 앞에 자동으로 붙인다.
+`dynamic_safe_prefix: true`이면 `uav_exploration_node`가 start signal 이후
+`map -> x500_gimbal_0/base_link` TF를 읽고, runtime에서 안전한 transition waypoint를 구성한다.
+기본값인 `force_takeoff_before_path: true`에서는 별도 `TAKEOFF_CLIMB`/`TAKEOFF_HOLD` 단계를
+먼저 수행한 뒤 transition과 CSV scan waypoint를 시작한다.
+전체 미션에서는 `/ugv/mission_event`의 `MISSION2_START_REACHED` event를 받은 순간
+UAV TF를 `mission2_takeoff_origin`으로 latch하고, 이후 start signal에서 그 origin의 x/y를
+기준으로 먼저 상승한다.
+`/command/pose` publish는 guard를 통과해야 하며, Mission2 origin이 없거나 takeoff 중 x/y가
+origin과 다르면 차단된다. `offboard_control`도 `/uav/mission2_takeoff_origin`을 받기 전에는
+`/command/pose`를 PX4 setpoint로 변환하지 않는다.
+
+중요 좌표계 수정:
+
+* PX4 `TrajectorySetpoint.position`은 PX4 local NED absolute setpoint이다.
+* 따라서 Mission2 map origin을 빼서 `(0, 0, -8)`을 보내면 안 된다.
+* Mission2 순간의 PX4 `/fmu/out/vehicle_local_position`을 함께 anchor로 저장해야 한다.
+* 변환식은 아래와 같다.
+
+```text
+delta_map_enu = target_map_enu - mission2_map_anchor_enu
+delta_ned = ENU_TO_NED(delta_map_enu)
+final_px4_setpoint_ned = mission2_px4_anchor_ned + delta_ned
+```
+
+첫 takeoff에서 `final_px4_setpoint_ned`의 x/y는 0이 아니라 Mission2 순간 PX4 local x/y와
+같아야 한다. z만 `mission2_px4_anchor_ned.z - takeoff_relative_height`가 되어야 한다.
+
+현재 Mission1에서는 UGV와 UAV가 함께 이동하는 것이 확인되었다. Mission1 이후 Mission2를
+준비하는 UAV 이륙 동작도 현재 위치 기준 상승 단계까지 안정적으로 동작하는 것을 확인했다.
+다만 WP CSV는 현재 맵과 완전히 맞지 않는 구간이 있어, 실제 장애물/marker 배치 기준으로
+좌표와 yaw, gimbal pitch를 추가 보정해야 한다. ArUco marker detection 노드의 실제 연동은
+아직 별도로 확인하지 않았다.
+
+## Forced takeoff before path
+
+Mission1 동안 UAV가 UGV와 함께 이동하므로, UAV exploration 시작 시점의 위치는 매번 달라질 수
+있다. 따라서 exploration start signal이 들어오면 CSV 첫 waypoint로 바로 이동하지 않고,
+먼저 Mission2 시작 event 시점에 저장한 `mission2_takeoff_origin`의 x/y를 고정한 상태로
+z 방향 상승만 수행한다.
+
+기본 동작 순서:
+
+```text
+IDLE
+  -> /ugv/mission_event: MISSION2_START_REACHED
+  -> latch mission2_takeoff_origin from map -> x500_gimbal_0/base_link
+  -> start signal
+  -> TAKEOFF_CLIMB
+  -> TAKEOFF_HOLD
+  -> TAKEOFF_COMPLETE
+  -> dynamic transition/path build
+  -> EXPLORING
+```
+
+start signal은 `/uav/exploration_start true`, `/mission/state=UAV_EXPLORATION_READY`,
+또는 `required_start_states`에 포함된 `UAV_TAKEOFF_READY`로 받을 수 있다. start 전에는
+`/command/pose`를 publish하지 않는다. `require_mission2_latched_origin: true`에서는
+Mission2 origin이 latch되기 전 start signal이 들어와도 `WAITING_FOR_MISSION2_ORIGIN` 상태로
+머물며 `/command/pose`와 CSV waypoint publish를 시작하지 않는다. 이것은 spawn 위치,
+launch 시점 위치, CSV 첫 waypoint 쪽으로 이동하지 않기 위한 의도된 안전 동작이다.
+
+forced takeoff target 계산:
+
+```text
+takeoff_mode == "relative":
+  target_z = mission2_origin_z + takeoff_relative_height
+
+takeoff_mode == "absolute":
+  target_z = max(takeoff_absolute_altitude, mission2_origin_z + 1.0)
+```
+
+`TAKEOFF_CLIMB`에서는 `forced_takeoff_climb` pose만 publish하며 CSV index를 증가시키지 않는다.
+첫 `/command/pose`는 반드시 `x=mission2_origin_x`, `y=mission2_origin_y`이고 z만 상승 목표로
+설정된다.
+현재 z가 `target_z - takeoff_tolerance` 이상이 되면 `TAKEOFF_ALTITUDE_REACHED` event를 내고
+`TAKEOFF_HOLD`로 들어간다. `takeoff_hold_sec` 동안 같은 pose를 유지한 뒤
+`TAKEOFF_HOLD_COMPLETE` event를 내고, 그때의 TF 위치를 기준으로 transition waypoint와 scan
+waypoint를 구성한다. CSV/dynamic path는 `PATH_FOLLOWING_STARTED` 이후에만 시작된다.
+
+관련 파라미터:
+
+```yaml
+mission_event_topic: "/ugv/mission_event"
+mission2_start_event: "MISSION2_START_REACHED"
+use_mission2_latched_origin: true
+require_mission2_latched_origin: true
+mission2_origin_map_frame: "map"
+mission2_origin_uav_frame: "x500_gimbal_0/base_link"
+force_takeoff_before_path: true
+takeoff_mode: "relative"
+takeoff_relative_height: 8.0
+takeoff_absolute_altitude: 18.0
+takeoff_hold_sec: 3.0
+takeoff_tolerance: 0.6
+takeoff_gimbal_pitch_deg: -60.0
+safe_altitude_after_takeoff: 18.0
+transition_altitude: 18.0
+max_transition_step: 15.0
+```
+
+`/uav/mission2_takeoff_origin`은 latch된 origin을 `geometry_msgs/msg/PoseStamped`로 publish한다.
+CSV 안의 `takeoff_climb`, `safe_altitude`, `transition_*` row는 전체 미션에서는 정적 spawn
+위치 기준일 수 있으므로 scan waypoint 후보에서 제거하고, Mission2 origin 기준 prefix를
+runtime에서 다시 구성한다.
+
+## Mission2 takeoff origin hard rule
+
+* UAV는 spawn 위치나 launch 시점 위치에서 이륙하지 않는다.
+* UAV는 반드시 `/ugv/mission_event: MISSION2_START_REACHED` 순간의 UAV TF를 Mission2 takeoff origin으로 저장한다.
+* `/uav/mission2_takeoff_origin`이 publish되지 않으면 UAV exploration은 시작하지 않는다.
+* 첫 `/command/pose`는 반드시 `mission2_takeoff_origin`의 x/y와 같고 z만 증가해야 한다.
+* CSV는 takeoff 완료 후 scan waypoint 후보로만 사용한다.
+* `/command/pose` publish는 guard를 통과해야 하며, 잘못된 x/y는 `POSE_BLOCKED_*` event로 차단된다.
+* `offboard_control`도 `/uav/mission2_takeoff_origin` 없이 `/command/pose`를 PX4로 보내지 않는다.
+
+## Mission2 latch 실행 순서
+
+필수 실행 순서:
+
+1. PX4/Gazebo 실행
+2. `turn_interfaces` 실행
+3. `mission_manager` 실행
+4. `uav_exploration_safe.launch.py` 실행
+5. `ugv_path_follower` 실행
+6. UGV가 Mission2 시작 지점에 도착
+7. `/ugv/mission_event`에 `MISSION2_START_REACHED` 발생
+8. `uav_exploration_node`가 이 event를 받아 Mission2 takeoff origin latch
+9. `/mission/state`가 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`가 되거나 수동 start 입력
+10. UAV가 latched origin의 x/y에서 먼저 상승
+11. 이후 CSV scan waypoint 수행
+
+UAV exploration node는 Mission2 event를 받아야 하므로, Mission2 event 발생 전에 실행되어
+있어야 한다. Mission2 event를 놓치면 origin이 latch되지 않고,
+`require_mission2_latched_origin: true`이면 UAV는 출발하지 않는다. 이것은 의도된 안전 동작이다.
 
 Mission1 동안 UGV와 UAV가 함께 움직이는지 아래 TF를 동시에 확인한다.
 
@@ -131,6 +262,7 @@ Subscriptions:
 
 ```text
 /mission/state
+/ugv/mission_event
 /uav/exploration_start
 /perception/uav/marker_detections
 ```
@@ -142,6 +274,7 @@ Publishers:
 /gimbal_pitch_degree
 /uav/exploration_state
 /uav/exploration_event
+/uav/mission2_takeoff_origin
 /mission/uav_exploration_complete
 ```
 
@@ -150,6 +283,44 @@ Publishers:
 ```bash
 source ~/ros2_ws/install/setup.bash
 ros2 launch asp_uav_control uav_exploration.launch.py
+```
+
+## Safe takeoff CSV
+
+기본 `uav_path.csv`는 scan waypoint 후보를 포함한다. UAV가 첫 waypoint로 바로 수평 이동하면
+나무나 건물에 부딪힐 수 있으므로, safe launch 테스트에서는 `uav_path_safe.csv`를 사용한다.
+`uav_path_safe.csv`는 현재 시작 위치에서 먼저 z 방향으로 상승한 뒤, safe altitude에서 첫 scan
+waypoint 방향으로 단계적으로 이동한다.
+
+다만 전체 미션 검증에서는 UAV가 Mission1 동안 UGV와 함께 이동한 뒤 Mission2 Trigger 시점의
+현재 위치에서 이륙해야 한다. 최초 spawn 위치 기준으로 만들어진 정적 `uav_path_safe.csv`를
+그대로 런타임에서 사용하면 안 된다. 이 파일은 정적 후보/과거 산출물로만 둔다.
+
+`uav_exploration_safe.launch.py`는 `uav_path_generated.csv`를 scan waypoint 후보로 읽고,
+runtime에서 현재 TF 기준 forced takeoff와 dynamic transition을 적용한다.
+`dynamic_safe_prefix: true`일 때 CSV 내부의 `takeoff_climb`, `safe_altitude`, `transition_*`
+row는 scan waypoint에서 제거된다.
+Mission2 이후 시작 state는 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`를 허용하며,
+수동 테스트는 `/uav/exploration_start true`로 수행할 수 있다.
+
+```bash
+python3 tools/path_tools/generate_takeoff_safe_csv.py \
+  --input src/asp_uav_control/path/uav_path.csv \
+  --output src/asp_uav_control/path/uav_path_safe.csv \
+  --start-x <현재_x> --start-y <현재_y> --start-z <현재_z> \
+  --safe-altitude 18.0
+```
+
+기본 launch:
+
+```bash
+ros2 launch asp_uav_control uav_exploration.launch.py
+```
+
+safe launch:
+
+```bash
+ros2 launch asp_uav_control uav_exploration_safe.launch.py
 ```
 
 기본 launch인 `uav_exploration.launch.py`는 기본 경로 `uav_path.csv`를 사용한다.
@@ -176,15 +347,105 @@ ros2 topic pub --once /uav/exploration_start std_msgs/msg/Bool "{data: true}"
 ## 검증
 
 ```bash
+ros2 topic echo /ugv/mission_event
 ros2 topic echo /mission/state
 ros2 topic echo /command/pose
 ros2 topic echo /uav/exploration_state
 ros2 topic echo /uav/exploration_event
+ros2 topic echo /uav/mission2_takeoff_origin
 ros2 topic echo /mission/uav_exploration_complete
+ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
 ```
 
 launch 직후 `/uav/exploration_state`가 `IDLE`이고 `/command/pose` 출력이 없다면 자동 시작 방지 조건이 맞다.
-`UAV_EXPLORATION_READY` 또는 수동 start 이후에만 waypoint pose와 gimbal pitch가 publish되어야 한다.
+`MISSION2_START_REACHED` 이후 `/uav/exploration_event`에
+`MISSION2_TAKEOFF_ORIGIN_LATCHED`가 출력되고, `/uav/mission2_takeoff_origin`이 Mission2 지점의
+UAV 위치를 publish해야 한다. start 후 첫 `/command/pose`의 x/y는
+`mission2_takeoff_origin`의 x/y와 같고 z만 `takeoff_relative_height`만큼 증가해야 한다.
+
+Mission2 origin이 latch되기 전에 수동 start를 보내면 `WAITING_FOR_MISSION2_ORIGIN` 상태가
+되어야 하고 `/command/pose`가 publish되면 안 된다.
+
+전체 런타임 검증 예:
+
+```bash
+# Terminal 1
+cd ~/PX4-Autopilot_ASP
+make px4_sitl gz_x500_gimbal
+
+# Terminal 2
+px4humble
+source ~/ros2_ws/install/setup.bash
+ros2 launch gazebo_env_setup turn_interfaces.launch.py
+
+# Terminal 3
+px4humble
+source ~/ros2_ws/install/setup.bash
+ros2 launch asp_mission_manager mission_manager.launch.py
+
+# Terminal 4
+px4humble
+source ~/ros2_ws/install/setup.bash
+ros2 launch asp_uav_control uav_exploration_safe.launch.py
+
+# Terminal 5
+px4humble
+source ~/ros2_ws/install/setup.bash
+ros2 launch gazebo_env_setup ugv_bridge.launch.py
+
+# Terminal 6
+px4humble
+source ~/ros2_ws/install/setup.bash
+ros2 launch asp_ugv_control ugv_path_follower.launch.py
+```
+
+Monitoring:
+
+```bash
+ros2 topic echo /ugv/mission_event
+ros2 topic echo /uav/exploration_event
+ros2 topic echo /uav/mission2_takeoff_origin
+ros2 topic echo /mission/state
+ros2 topic echo /command/pose
+ros2 topic info -v /command/pose
+ros2 topic echo /debug/offboard/frame_report
+ros2 topic echo /debug/offboard/local_pose_enu
+ros2 topic echo /debug/offboard/setpoint_pose_ned
+ros2 topic echo /fmu/out/vehicle_local_position
+ros2 topic echo /fmu/in/trajectory_setpoint
+```
+
+정상 흐름:
+
+1. `/ugv/mission_event`: `MISSION2_START_REACHED`
+2. `/uav/exploration_event`: `MISSION2_TAKEOFF_ORIGIN_LATCHED`
+3. `/uav/mission2_takeoff_origin`에 Mission2 지점 UAV 위치 publish
+4. `/mission/state`가 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`
+5. 또는 수동 `/uav/exploration_start true`
+6. 첫 `/command/pose`: `x=mission2_takeoff_origin.x`, `y=mission2_takeoff_origin.y`,
+   `z=mission2_takeoff_origin.z + takeoff_relative_height`
+7. UAV가 그 자리에서 상승
+8. `TAKEOFF_HOLD_COMPLETE` 이후 `PATH_FOLLOWING_STARTED`
+9. 그 다음 scan waypoint 이동
+
+offboard 변환 정상 기준:
+
+```text
+origin_source=mission2_map_and_px4_local_anchor
+delta_map_enu x,y ~= 0
+delta_map_enu z ~= takeoff_relative_height
+final_setpoint_ned x,y == mission2_px4_anchor_ned x,y
+final_setpoint_ned z == mission2_px4_anchor_ned z - takeoff_relative_height
+```
+
+문제가 발생하면 즉시 아래 진단 스크립트를 실행한다.
+
+```bash
+bash tools/diagnostics/uav_pose_source_audit.sh
+```
+
+이 로그에서 `/command/pose` publisher 목록, 첫 `/command/pose`와 Mission2 origin의 x/y 차이,
+정적 safe path 또는 forbidden spawn 좌표 참조 여부를 확인한다.
 
 ## 완료 기준
 

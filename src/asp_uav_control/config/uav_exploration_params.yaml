@@ -4,8 +4,23 @@ uav_exploration_node:
     use_safe_path: false
     safe_path_csv: ""
     dynamic_safe_prefix: true
+    force_takeoff_before_path: true
+    takeoff_mode: "relative"
+    takeoff_relative_height: 8.0
+    takeoff_absolute_altitude: 18.0
+    takeoff_hold_sec: 3.0
+    takeoff_tolerance: 0.6
+    takeoff_xy_tolerance: 0.75
+    takeoff_gimbal_pitch_deg: -60.0
+    block_pose_if_not_latched: true
+    block_pose_if_xy_not_origin: true
+    forbidden_spawn_guard_enabled: true
+    forbidden_spawn_x: -55.0
+    forbidden_spawn_y: 80.0
+    forbidden_spawn_radius: 5.0
     safe_takeoff_relative_height: 5.0
     safe_altitude: 18.0
+    safe_altitude_after_takeoff: 18.0
     transition_altitude: 18.0
     max_transition_step: 15.0
     safe_prefix_hold_sec: 2.0
@@ -18,10 +33,19 @@ uav_exploration_node:
     gimbal_pitch_topic: "/gimbal_pitch_degree"
 
     mission_state_topic: "/mission/state"
+    mission_event_topic: "/ugv/mission_event"
+    mission2_start_event: "MISSION2_START_REACHED"
     exploration_start_topic: "/uav/exploration_start"
     exploration_state_topic: "/uav/exploration_state"
     exploration_event_topic: "/uav/exploration_event"
     exploration_complete_topic: "/mission/uav_exploration_complete"
+    mission2_takeoff_origin_topic: "/uav/mission2_takeoff_origin"
+
+    use_mission2_latched_origin: true
+    require_mission2_latched_origin: true
+    clear_origin_on_startup: true
+    mission2_origin_map_frame: "map"
+    mission2_origin_uav_frame: "x500_gimbal_0/base_link"
 
     marker_detections_topic: "/perception/uav/marker_detections"
     min_marker_id: 0
@@ -30,6 +54,9 @@ uav_exploration_node:
     start_on_launch: false
     start_on_mission_state: true
     required_start_state: "UAV_EXPLORATION_READY"
+    required_start_states:
+      - "UAV_EXPLORATION_READY"
+      - "UAV_TAKEOFF_READY"
 
     pose_publish_rate_hz: 10.0
     waypoint_tolerance: 1.0

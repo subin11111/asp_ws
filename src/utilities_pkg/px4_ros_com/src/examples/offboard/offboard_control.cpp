@@ -8,6 +8,7 @@
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -66,6 +67,9 @@ public:
     vehicle_command_ack_sub_ = create_subscription<VehicleCommandAck>(
       "/fmu/out/vehicle_command_ack", rclcpp::SensorDataQoS(),
       std::bind(&OffboardControl::vehicle_command_ack_callback, this, _1));
+    vehicle_local_position_sub_ = create_subscription<VehicleLocalPosition>(
+      "/fmu/out/vehicle_local_position", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardControl::vehicle_local_position_callback, this, _1));
 
     /* ───── TF Listener ───── */
     declare_parameter<std::string>("map_frame", "map");
@@ -74,7 +78,11 @@ public:
     declare_parameter<bool>("enu_to_ned_enabled", true);
     declare_parameter<bool>("debug_log_target_pose", true);
     declare_parameter<bool>("use_map_origin_offset", true);
-    declare_parameter<bool>("auto_set_map_origin_on_first_pose", true);
+    declare_parameter<bool>("auto_set_map_origin_on_first_pose", false);
+    declare_parameter<bool>("require_external_origin_for_pose", true);
+    declare_parameter<std::string>("external_origin_topic", "/uav/mission2_takeoff_origin");
+    declare_parameter<bool>("reject_pose_without_origin", true);
+    declare_parameter<bool>("clear_target_on_pose_reject", true);
     declare_parameter<double>("map_origin_x", 0.0);
     declare_parameter<double>("map_origin_y", 0.0);
     declare_parameter<double>("map_origin_z", 0.0);
@@ -85,17 +93,30 @@ public:
     get_parameter("debug_log_target_pose", debug_log_target_pose_);
     get_parameter("use_map_origin_offset", use_map_origin_offset_);
     get_parameter("auto_set_map_origin_on_first_pose", auto_set_map_origin_on_first_pose_);
+    get_parameter("require_external_origin_for_pose", require_external_origin_for_pose_);
+    get_parameter("external_origin_topic", external_origin_topic_);
+    get_parameter("reject_pose_without_origin", reject_pose_without_origin_);
+    get_parameter("clear_target_on_pose_reject", clear_target_on_pose_reject_);
     get_parameter("map_origin_x", map_origin_.x());
     get_parameter("map_origin_y", map_origin_.y());
     get_parameter("map_origin_z", map_origin_.z());
-    map_origin_initialized_ = !auto_set_map_origin_on_first_pose_;
+    map_origin_initialized_ =
+      !require_external_origin_for_pose_ && !auto_set_map_origin_on_first_pose_;
+    origin_source_ = map_origin_initialized_ ? "configured_map_origin" : "none";
+
+    rclcpp::QoS origin_qos(1);
+    origin_qos.transient_local().reliable();
+    external_origin_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+      external_origin_topic_, origin_qos,
+      std::bind(&OffboardControl::external_origin_callback, this, _1));
 
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(tf_buffer_, this, false);
     RCLCPP_INFO(
       get_logger(),
-      "offboard_control frames: map_frame=%s base_frame=%s enu_to_ned_enabled=%s use_map_origin_offset=%s",
+      "offboard_control frames: map_frame=%s base_frame=%s enu_to_ned_enabled=%s use_map_origin_offset=%s external_origin_topic=%s require_external_origin_for_pose=%s",
       map_frame_.c_str(), base_frame_.c_str(), enu_to_ned_enabled_ ? "true" : "false",
-      use_map_origin_offset_ ? "true" : "false");
+      use_map_origin_offset_ ? "true" : "false", external_origin_topic_.c_str(),
+      require_external_origin_for_pose_ ? "true" : "false");
 
     /* ───── Loop timer (20 Hz) ───── */
     timer_ = create_wall_timer(std::chrono::milliseconds(50), std::bind(&OffboardControl::timer_callback, this));
@@ -114,9 +135,11 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr        twist_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr           gimbal_pitch_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr              disarm_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr  external_origin_sub_;
   rclcpp::Subscription<VehicleControlMode>::SharedPtr               vehicle_control_mode_sub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr                    vehicle_status_sub_;
   rclcpp::Subscription<VehicleCommandAck>::SharedPtr                vehicle_command_ack_sub_;
+  rclcpp::Subscription<VehicleLocalPosition>::SharedPtr             vehicle_local_position_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   /* ───────── TF ───────── */
@@ -130,9 +153,22 @@ private:
   bool enu_to_ned_enabled_{true};
   bool debug_log_target_pose_{true};
   bool use_map_origin_offset_{true};
-  bool auto_set_map_origin_on_first_pose_{true};
+  bool auto_set_map_origin_on_first_pose_{false};
+  bool require_external_origin_for_pose_{true};
+  std::string external_origin_topic_{"/uav/mission2_takeoff_origin"};
+  bool reject_pose_without_origin_{true};
+  bool clear_target_on_pose_reject_{true};
   bool map_origin_initialized_{false};
   Eigen::Vector3d map_origin_{0.0, 0.0, 0.0};
+  Eigen::Vector3d mission2_map_anchor_enu_{0.0, 0.0, 0.0};
+  Eigen::Vector3d mission2_px4_anchor_ned_{0.0, 0.0, 0.0};
+  Eigen::Vector3d latest_px4_local_ned_{0.0, 0.0, 0.0};
+  Eigen::Vector3d last_delta_map_enu_{0.0, 0.0, 0.0};
+  Eigen::Vector3d last_final_setpoint_ned_{0.0, 0.0, 0.0};
+  bool latest_px4_local_position_valid_{false};
+  rclcpp::Time latest_px4_local_position_time_{0, 0, RCL_ROS_TIME};
+  std::string origin_source_{"none"};
+  std::string pose_rejected_reason_{"none"};
   geometry_msgs::msg::PoseStamped last_input_pose_enu_{};
   geometry_msgs::msg::PoseStamped last_local_pose_enu_{};
   geometry_msgs::msg::PoseStamped last_setpoint_pose_ned_{};
@@ -167,15 +203,17 @@ private:
       RCLCPP_INFO(get_logger(), "Home altitude locked at %.2f m", home_altitude_);
     }
 
-    /* (1) 오프보드 제어모드 & 셋포인트 송출 */
+    /* (1) 오프보드 제어모드 heartbeat */
     publish_offboard_control_mode();
-    trajectory_setpoint_pub_->publish(setpoint_);
 
-    /* (2) 아직 셋포인트가 없으면 대기 */
+    /* (2) 아직 셋포인트가 없으면 trajectory_setpoint를 내보내지 않는다. */
     if (!target_command_) {
-      RCLCPP_DEBUG(get_logger(), "Waiting for target command.");
+      RCLCPP_DEBUG(get_logger(), "Waiting for target command. Not publishing trajectory_setpoint.");
+      publish_frame_report();
       return;
     }
+
+    trajectory_setpoint_pub_->publish(setpoint_);
 
     if (setpoint_counter_ < 20) {
       ++setpoint_counter_;
@@ -207,19 +245,29 @@ private:
   // ① Pose: 위치 제어
   void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
   {
+    if (reject_pose_without_origin_ && !map_origin_initialized_) {
+      reject_pose_command(
+        "missing_mission2_map_and_px4_local_anchor",
+        "Rejecting /command/pose because Mission2 map/PX4 local anchors are not initialized.");
+      return;
+    }
+
     mode_ = ControlMode::POSITION;
     last_input_pose_enu_ = *msg;
     last_input_pose_enu_.header.frame_id = msg->header.frame_id.empty() ? map_frame_ : msg->header.frame_id;
 
-    // /command/pose is a ROS/Gazebo map ENU absolute pose. PX4 position
-    // setpoints are local, so subtract map_origin_ before ENU -> NED.
     Eigen::Vector3d target_map_enu(msg->pose.position.x,
                                    msg->pose.position.y,
                                    msg->pose.position.z);
-    ensure_map_origin_initialized(target_map_enu);
-    const Eigen::Vector3d local_enu = use_map_origin_offset_ ?
-      target_map_enu - map_origin_ :
-      target_map_enu;
+
+    // /command/pose is a map ENU absolute target. PX4 trajectory setpoints are
+    // PX4 local NED absolute positions. Keep the Mission2 PX4 local x/y anchor
+    // and only add the map-frame delta from the Mission2 latch pose.
+    const Eigen::Vector3d delta_map_enu = target_map_enu - mission2_map_anchor_enu_;
+    const Eigen::Vector3d delta_ned = enu_to_ned_enabled_ ?
+      px4_ros_com::frame_transforms::enu_to_ned_local_frame(delta_map_enu) :
+      delta_map_enu;
+    const Eigen::Vector3d p_ned = mission2_px4_anchor_ned_ + delta_ned;
 
     // ROS/Gazebo map/local frame uses ENU convention:
     //   ENU x = East, y = North, z = Up
@@ -229,9 +277,6 @@ private:
     //   ned_x = enu_y
     //   ned_y = enu_x
     //   ned_z = -enu_z
-    const Eigen::Vector3d p_ned = enu_to_ned_enabled_ ?
-      px4_ros_com::frame_transforms::enu_to_ned_local_frame(local_enu) :
-      local_enu;
     setpoint_.position[0] = static_cast<float>(p_ned.x());
     setpoint_.position[1] = static_cast<float>(p_ned.y());
     setpoint_.position[2] = static_cast<float>(p_ned.z());
@@ -249,13 +294,16 @@ private:
       yaw_ned = tf2::getYaw(msg->pose.orientation);
     }
     setpoint_.yaw = static_cast<float>(yaw_ned);
-    last_local_pose_enu_ = make_debug_pose(local_enu, yaw_ned, "local_enu");
+    last_delta_map_enu_ = delta_map_enu;
+    last_final_setpoint_ned_ = p_ned;
+    last_local_pose_enu_ = make_debug_pose(delta_map_enu, yaw_ned, "mission2_delta_enu");
     last_setpoint_pose_ned_ = make_debug_setpoint_pose(p_ned, yaw_ned);
     publish_debug_setpoints();
     if (!target_command_) {
       setpoint_counter_ = 0;
     }
     target_command_ = true;
+    pose_rejected_reason_ = "none";
     if (debug_log_target_pose_) {
       RCLCPP_INFO(
         get_logger(),
@@ -263,11 +311,11 @@ private:
         target_map_enu.x(), target_map_enu.y(), target_map_enu.z(), tf2::getYaw(msg->pose.orientation));
       RCLCPP_INFO(
         get_logger(),
-        "Local ENU after origin offset: x=%.2f y=%.2f z=%.2f",
-        local_enu.x(), local_enu.y(), local_enu.z());
+        "Mission2 delta map ENU: x=%.2f y=%.2f z=%.2f",
+        delta_map_enu.x(), delta_map_enu.y(), delta_map_enu.z());
       RCLCPP_INFO(
         get_logger(),
-        "Converted PX4 NED setpoint: x=%.2f y=%.2f z=%.2f yaw=%.2f",
+        "Final PX4 local NED setpoint from anchor+delta: x=%.2f y=%.2f z=%.2f yaw=%.2f",
         setpoint_.position[0], setpoint_.position[1], setpoint_.position[2], setpoint_.yaw);
     }
   }
@@ -290,6 +338,47 @@ private:
       setpoint_counter_ = 0;
     }
     target_command_ = true;
+  }
+
+  void external_origin_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+  {
+    if (!latest_px4_local_position_valid_) {
+      map_origin_initialized_ = false;
+      pose_rejected_reason_ = "missing_vehicle_local_position_at_origin_latch";
+      origin_source_ = "none";
+      RCLCPP_ERROR(
+        get_logger(),
+        "Received %s but cannot initialize origin: latest /fmu/out/vehicle_local_position is invalid or missing.",
+        external_origin_topic_.c_str());
+      publish_frame_report();
+      return;
+    }
+
+    mission2_map_anchor_enu_.x() = msg->pose.position.x;
+    mission2_map_anchor_enu_.y() = msg->pose.position.y;
+    mission2_map_anchor_enu_.z() = msg->pose.position.z;
+    mission2_px4_anchor_ned_ = latest_px4_local_ned_;
+
+    map_origin_ = mission2_map_anchor_enu_;
+    map_origin_initialized_ = true;
+    origin_source_ = "mission2_map_and_px4_local_anchor";
+    pose_rejected_reason_ = "none";
+    RCLCPP_INFO(
+      get_logger(),
+      "Mission2 anchors set from %s: map_enu=(%.2f, %.2f, %.2f), px4_ned=(%.2f, %.2f, %.2f)",
+      external_origin_topic_.c_str(),
+      mission2_map_anchor_enu_.x(), mission2_map_anchor_enu_.y(), mission2_map_anchor_enu_.z(),
+      mission2_px4_anchor_ned_.x(), mission2_px4_anchor_ned_.y(), mission2_px4_anchor_ned_.z());
+    publish_frame_report();
+  }
+
+  void vehicle_local_position_callback(const VehicleLocalPosition::SharedPtr msg)
+  {
+    latest_px4_local_position_valid_ = msg->xy_valid && msg->z_valid;
+    latest_px4_local_ned_.x() = msg->x;
+    latest_px4_local_ned_.y() = msg->y;
+    latest_px4_local_ned_.z() = msg->z;
+    latest_px4_local_position_time_ = this->now();
   }
 
   // ③ Gimbal pitch
@@ -393,9 +482,24 @@ private:
     vehicle_command_pub_->publish(cmd);
   }
 
+  void reject_pose_command(const std::string & reason, const std::string & log_message)
+  {
+    pose_rejected_reason_ = reason;
+    if (clear_target_on_pose_reject_) {
+      target_command_ = false;
+      setpoint_counter_ = 0;
+    }
+    RCLCPP_ERROR(get_logger(), "%s", log_message.c_str());
+    publish_frame_report();
+  }
+
   void ensure_map_origin_initialized(const Eigen::Vector3d & first_pose_map_enu)
   {
     if (!use_map_origin_offset_ || map_origin_initialized_) {
+      return;
+    }
+
+    if (require_external_origin_for_pose_) {
       return;
     }
 
@@ -405,6 +509,7 @@ private:
       map_origin_.y() = tf_uav.transform.translation.y;
       map_origin_.z() = tf_uav.transform.translation.z;
       map_origin_initialized_ = true;
+      origin_source_ = "tf";
       RCLCPP_INFO(
         get_logger(),
         "Map origin for PX4 local conversion set from TF: x=%.2f, y=%.2f, z=%.2f",
@@ -412,8 +517,13 @@ private:
       return;
     }
 
+    if (!auto_set_map_origin_on_first_pose_) {
+      return;
+    }
+
     map_origin_ = first_pose_map_enu;
     map_origin_initialized_ = true;
+    origin_source_ = "first_pose";
     RCLCPP_WARN(
       get_logger(),
       "Failed to lookup UAV TF for map origin. Using first /command/pose as origin.");
@@ -450,7 +560,11 @@ private:
     debug_input_pose_pub_->publish(last_input_pose_enu_);
     debug_local_pose_pub_->publish(last_local_pose_enu_);
     debug_setpoint_pose_pub_->publish(last_setpoint_pose_ned_);
+    publish_frame_report();
+  }
 
+  void publish_frame_report()
+  {
     std_msgs::msg::String report;
     std::ostringstream stream;
     stream << "map_frame=" << map_frame_
@@ -458,19 +572,42 @@ private:
            << ", enu_to_ned_enabled=" << (enu_to_ned_enabled_ ? "true" : "false")
            << ", use_map_origin_offset=" << (use_map_origin_offset_ ? "true" : "false")
            << ", origin_initialized=" << (map_origin_initialized_ ? "true" : "false")
+           << ", origin_source=" << origin_source_
+           << ", pose_rejected_reason=" << pose_rejected_reason_
+           << ", target_command=" << (target_command_ ? "true" : "false")
            << ", map_origin=("
            << map_origin_.x() << ","
            << map_origin_.y() << ","
            << map_origin_.z() << ")"
+           << ", mission2_map_anchor_enu=("
+           << mission2_map_anchor_enu_.x() << ","
+           << mission2_map_anchor_enu_.y() << ","
+           << mission2_map_anchor_enu_.z() << ")"
+           << ", mission2_px4_anchor_ned=("
+           << mission2_px4_anchor_ned_.x() << ","
+           << mission2_px4_anchor_ned_.y() << ","
+           << mission2_px4_anchor_ned_.z() << ")"
+           << ", latest_px4_local_ned=("
+           << latest_px4_local_ned_.x() << ","
+           << latest_px4_local_ned_.y() << ","
+           << latest_px4_local_ned_.z() << ")"
            << ", input_enu=("
            << last_input_pose_enu_.pose.position.x << ","
            << last_input_pose_enu_.pose.position.y << ","
            << last_input_pose_enu_.pose.position.z << ")"
-           << ", local_enu=("
+           << ", delta_map_enu=("
+           << last_delta_map_enu_.x() << ","
+           << last_delta_map_enu_.y() << ","
+           << last_delta_map_enu_.z() << ")"
+           << ", local_pose_enu_debug=("
            << last_local_pose_enu_.pose.position.x << ","
            << last_local_pose_enu_.pose.position.y << ","
            << last_local_pose_enu_.pose.position.z << ")"
-           << ", setpoint_ned=("
+           << ", final_setpoint_ned=("
+           << last_final_setpoint_ned_.x() << ","
+           << last_final_setpoint_ned_.y() << ","
+           << last_final_setpoint_ned_.z() << ")"
+           << ", setpoint_pose_ned_debug=("
            << last_setpoint_pose_ned_.pose.position.x << ","
            << last_setpoint_pose_ned_.pose.position.y << ","
            << last_setpoint_pose_ned_.pose.position.z << ")";
