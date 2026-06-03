@@ -1,0 +1,28 @@
+precision_landing_node:
+  ros__parameters:
+    start_topic: "/mission/precision_landing_start"
+    marker_detections_topic: "/perception/uav/marker_detections"
+    command_pose_topic: "/command/pose"
+    command_land_topic: "/command/land"
+    landing_complete_topic: "/status/landing_complete"
+    state_topic: "/precision_landing/state"
+    event_topic: "/precision_landing/event"
+    mission_state_topic: "/mission/state"
+
+    map_frame: "map"
+    uav_base_frame: "x500_gimbal_0/base_link"
+    ugv_base_frame: "X1_asp/base_link"
+
+    landing_marker_id: -1
+    require_marker_for_descent: true
+
+    approach_altitude: 18.0
+    align_altitude: 10.0
+    descend_step_m: 1.0
+    final_land_altitude: 3.0
+    xy_tolerance_m: 0.6
+    pixel_tolerance_px: 60.0
+    marker_timeout_sec: 2.0
+    max_lost_marker_time_sec: 5.0
+    hold_sec_each_step: 1.5
+    max_landing_time_sec: 180.0

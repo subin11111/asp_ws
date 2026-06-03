@@ -58,6 +58,8 @@ public:
     twist_sub_         = create_subscription<geometry_msgs::msg::Twist>      ("/command/twist",  10, std::bind(&OffboardControl::twist_callback,  this, _1));
     gimbal_pitch_sub_  = create_subscription<std_msgs::msg::Float32>       ("/gimbal_pitch_degree", 10, std::bind(&OffboardControl::gimbal_callback, this, _1));
     disarm_sub_        = create_subscription<std_msgs::msg::Bool>         ("/command/disarm",   10, std::bind(&OffboardControl::disarm_callback, this, _1));
+    land_sub_          = create_subscription<std_msgs::msg::Bool>         ("/command/land",     10, std::bind(&OffboardControl::land_callback, this, _1));
+    mission_reset_sub_ = create_subscription<std_msgs::msg::Bool>         ("/mission/reset",    10, std::bind(&OffboardControl::mission_reset_callback, this, _1));
     vehicle_control_mode_sub_ = create_subscription<VehicleControlMode>(
       "/fmu/out/vehicle_control_mode", rclcpp::SensorDataQoS(),
       std::bind(&OffboardControl::vehicle_control_mode_callback, this, _1));
@@ -83,6 +85,9 @@ public:
     declare_parameter<std::string>("external_origin_topic", "/uav/mission2_takeoff_origin");
     declare_parameter<bool>("reject_pose_without_origin", true);
     declare_parameter<bool>("clear_target_on_pose_reject", true);
+    declare_parameter<bool>("allow_external_origin_reanchor", false);
+    declare_parameter<bool>("clear_origin_on_mission_reset", true);
+    declare_parameter<double>("external_origin_duplicate_tolerance_m", 0.2);
     declare_parameter<double>("map_origin_x", 0.0);
     declare_parameter<double>("map_origin_y", 0.0);
     declare_parameter<double>("map_origin_z", 0.0);
@@ -97,6 +102,9 @@ public:
     get_parameter("external_origin_topic", external_origin_topic_);
     get_parameter("reject_pose_without_origin", reject_pose_without_origin_);
     get_parameter("clear_target_on_pose_reject", clear_target_on_pose_reject_);
+    get_parameter("allow_external_origin_reanchor", allow_external_origin_reanchor_);
+    get_parameter("clear_origin_on_mission_reset", clear_origin_on_mission_reset_);
+    get_parameter("external_origin_duplicate_tolerance_m", external_origin_duplicate_tolerance_m_);
     get_parameter("map_origin_x", map_origin_.x());
     get_parameter("map_origin_y", map_origin_.y());
     get_parameter("map_origin_z", map_origin_.z());
@@ -113,10 +121,11 @@ public:
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(tf_buffer_, this, false);
     RCLCPP_INFO(
       get_logger(),
-      "offboard_control frames: map_frame=%s base_frame=%s enu_to_ned_enabled=%s use_map_origin_offset=%s external_origin_topic=%s require_external_origin_for_pose=%s",
+      "offboard_control frames: map_frame=%s base_frame=%s enu_to_ned_enabled=%s use_map_origin_offset=%s external_origin_topic=%s require_external_origin_for_pose=%s allow_external_origin_reanchor=%s",
       map_frame_.c_str(), base_frame_.c_str(), enu_to_ned_enabled_ ? "true" : "false",
       use_map_origin_offset_ ? "true" : "false", external_origin_topic_.c_str(),
-      require_external_origin_for_pose_ ? "true" : "false");
+      require_external_origin_for_pose_ ? "true" : "false",
+      allow_external_origin_reanchor_ ? "true" : "false");
 
     /* ───── Loop timer (20 Hz) ───── */
     timer_ = create_wall_timer(std::chrono::milliseconds(50), std::bind(&OffboardControl::timer_callback, this));
@@ -135,6 +144,8 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr        twist_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr           gimbal_pitch_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr              disarm_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr              land_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr              mission_reset_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr  external_origin_sub_;
   rclcpp::Subscription<VehicleControlMode>::SharedPtr               vehicle_control_mode_sub_;
   rclcpp::Subscription<VehicleStatus>::SharedPtr                    vehicle_status_sub_;
@@ -158,6 +169,9 @@ private:
   std::string external_origin_topic_{"/uav/mission2_takeoff_origin"};
   bool reject_pose_without_origin_{true};
   bool clear_target_on_pose_reject_{true};
+  bool allow_external_origin_reanchor_{false};
+  bool clear_origin_on_mission_reset_{true};
+  double external_origin_duplicate_tolerance_m_{0.2};
   bool map_origin_initialized_{false};
   Eigen::Vector3d map_origin_{0.0, 0.0, 0.0};
   Eigen::Vector3d mission2_map_anchor_enu_{0.0, 0.0, 0.0};
@@ -166,6 +180,8 @@ private:
   Eigen::Vector3d last_delta_map_enu_{0.0, 0.0, 0.0};
   Eigen::Vector3d last_final_setpoint_ned_{0.0, 0.0, 0.0};
   bool latest_px4_local_position_valid_{false};
+  bool last_origin_msg_ignored_{false};
+  uint64_t duplicate_origin_ignored_count_{0};
   rclcpp::Time latest_px4_local_position_time_{0, 0, RCL_ROS_TIME};
   std::string origin_source_{"none"};
   std::string pose_rejected_reason_{"none"};
@@ -342,10 +358,37 @@ private:
 
   void external_origin_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
   {
+    const Eigen::Vector3d received_map_anchor(
+      msg->pose.position.x,
+      msg->pose.position.y,
+      msg->pose.position.z);
+
+    if (map_origin_initialized_ && !allow_external_origin_reanchor_) {
+      const double origin_delta = (received_map_anchor - mission2_map_anchor_enu_).norm();
+      last_origin_msg_ignored_ = true;
+      ++duplicate_origin_ignored_count_;
+      if (origin_delta <= external_origin_duplicate_tolerance_m_) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Duplicate %s ignored. Existing anchor is kept. duplicate_origin_ignored_count=%lu",
+          external_origin_topic_.c_str(),
+          static_cast<unsigned long>(duplicate_origin_ignored_count_));
+      } else {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Received different mission2 origin while anchor already initialized. Ignoring because reanchor is disabled. delta=%.2f duplicate_origin_ignored_count=%lu",
+          origin_delta,
+          static_cast<unsigned long>(duplicate_origin_ignored_count_));
+      }
+      publish_frame_report();
+      return;
+    }
+
     if (!latest_px4_local_position_valid_) {
       map_origin_initialized_ = false;
       pose_rejected_reason_ = "missing_vehicle_local_position_at_origin_latch";
       origin_source_ = "none";
+      last_origin_msg_ignored_ = true;
       RCLCPP_ERROR(
         get_logger(),
         "Received %s but cannot initialize origin: latest /fmu/out/vehicle_local_position is invalid or missing.",
@@ -354,15 +397,14 @@ private:
       return;
     }
 
-    mission2_map_anchor_enu_.x() = msg->pose.position.x;
-    mission2_map_anchor_enu_.y() = msg->pose.position.y;
-    mission2_map_anchor_enu_.z() = msg->pose.position.z;
+    mission2_map_anchor_enu_ = received_map_anchor;
     mission2_px4_anchor_ned_ = latest_px4_local_ned_;
 
     map_origin_ = mission2_map_anchor_enu_;
     map_origin_initialized_ = true;
     origin_source_ = "mission2_map_and_px4_local_anchor";
     pose_rejected_reason_ = "none";
+    last_origin_msg_ignored_ = false;
     RCLCPP_INFO(
       get_logger(),
       "Mission2 anchors set from %s: map_enu=(%.2f, %.2f, %.2f), px4_ned=(%.2f, %.2f, %.2f)",
@@ -379,6 +421,31 @@ private:
     latest_px4_local_ned_.y() = msg->y;
     latest_px4_local_ned_.z() = msg->z;
     latest_px4_local_position_time_ = this->now();
+  }
+
+  void mission_reset_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data || !clear_origin_on_mission_reset_) {
+      return;
+    }
+    clear_external_origin_anchor("mission_reset");
+  }
+
+  void clear_external_origin_anchor(const std::string & reason)
+  {
+    map_origin_initialized_ =
+      !require_external_origin_for_pose_ && !auto_set_map_origin_on_first_pose_;
+    mission2_map_anchor_enu_ = Eigen::Vector3d(0.0, 0.0, 0.0);
+    mission2_px4_anchor_ned_ = Eigen::Vector3d(0.0, 0.0, 0.0);
+    map_origin_ = Eigen::Vector3d(0.0, 0.0, 0.0);
+    origin_source_ = map_origin_initialized_ ? "configured_map_origin" : "none";
+    pose_rejected_reason_ = reason;
+    target_command_ = false;
+    setpoint_counter_ = 0;
+    last_origin_msg_ignored_ = false;
+    duplicate_origin_ignored_count_ = 0;
+    RCLCPP_WARN(get_logger(), "Mission2 external origin anchor cleared: %s", reason.c_str());
+    publish_frame_report();
   }
 
   // ③ Gimbal pitch
@@ -418,6 +485,15 @@ private:
     px4_offboard_enabled_ = false;
     target_command_ = false;
     setpoint_counter_ = 0;
+  }
+
+  void land_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data) {
+      return;
+    }
+    RCLCPP_WARN(get_logger(), "LAND requested. Sending VEHICLE_CMD_NAV_LAND.");
+    publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND);
   }
 
   void vehicle_control_mode_callback(const VehicleControlMode::SharedPtr msg)
@@ -575,6 +651,9 @@ private:
            << ", origin_source=" << origin_source_
            << ", pose_rejected_reason=" << pose_rejected_reason_
            << ", target_command=" << (target_command_ ? "true" : "false")
+           << ", allow_external_origin_reanchor=" << (allow_external_origin_reanchor_ ? "true" : "false")
+           << ", last_origin_msg_ignored=" << (last_origin_msg_ignored_ ? "true" : "false")
+           << ", duplicate_origin_ignored_count=" << duplicate_origin_ignored_count_
            << ", map_origin=("
            << map_origin_.x() << ","
            << map_origin_.y() << ","

@@ -109,6 +109,8 @@ private:
     declare_parameter<double>("kp_distance", 0.5);
     declare_parameter<double>("slow_down_distance", 2.0);
     declare_parameter<int>("final_stop_mission_type", 2);
+    declare_parameter<int>("zero_publish_after_stop_count", 5);
+    declare_parameter<bool>("disable_cmd_after_stop", true);
   }
 
   void read_parameters()
@@ -128,6 +130,8 @@ private:
     get_parameter("kp_distance", kp_distance_);
     get_parameter("slow_down_distance", slow_down_distance_);
     get_parameter("final_stop_mission_type", final_stop_mission_type_);
+    get_parameter("zero_publish_after_stop_count", zero_publish_after_stop_count_);
+    get_parameter("disable_cmd_after_stop", disable_cmd_after_stop_);
 
     control_rate_hz_ = std::max(1.0, control_rate_hz_);
     waypoint_tolerance_ = std::max(0.05, waypoint_tolerance_);
@@ -137,6 +141,7 @@ private:
     min_linear_speed_ = clamp(min_linear_speed_, 0.0, max_linear_speed_);
     max_angular_speed_ = std::max(0.0, max_angular_speed_);
     slow_down_distance_ = std::max(0.1, slow_down_distance_);
+    zero_publish_after_stop_count_ = std::max(0, zero_publish_after_stop_count_);
   }
 
   bool load_mission_csv(const std::string & path)
@@ -212,7 +217,9 @@ private:
   void control_loop()
   {
     if (stopped_) {
-      publish_zero_twist();
+      if (!disable_cmd_after_stop_) {
+        publish_zero_twist();
+      }
       publish_state("STOPPED");
       return;
     }
@@ -344,11 +351,21 @@ private:
 
   void stop_mission(const std::string & event)
   {
+    if (stopped_) {
+      return;
+    }
     stopped_ = true;
-    publish_zero_twist();
+    publish_zero_twist_burst(zero_publish_after_stop_count_);
     publish_state("STOPPED");
     publish_event(event);
-    RCLCPP_INFO(get_logger(), "Mission1 stopped with event: %s", event.c_str());
+    if (disable_cmd_after_stop_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Mission1 stopped; released %s after %d zero commands.",
+        cmd_vel_topic_.c_str(), zero_publish_after_stop_count_);
+    } else {
+      RCLCPP_INFO(get_logger(), "Mission1 stopped with event: %s", event.c_str());
+    }
   }
 
   void publish_zero_twist()
@@ -358,6 +375,13 @@ private:
     }
     geometry_msgs::msg::Twist cmd;
     cmd_pub_->publish(cmd);
+  }
+
+  void publish_zero_twist_burst(int count)
+  {
+    for (int index = 0; index < count; ++index) {
+      publish_zero_twist();
+    }
   }
 
   void publish_state(const std::string & state)
@@ -418,6 +442,8 @@ private:
   double kp_distance_{0.5};
   double slow_down_distance_{2.0};
   int final_stop_mission_type_{2};
+  int zero_publish_after_stop_count_{5};
+  bool disable_cmd_after_stop_{true};
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;

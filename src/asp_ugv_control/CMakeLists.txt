@@ -26,8 +26,18 @@ ament_target_dependencies(ugv_path_follower_node
   ament_index_cpp
 )
 
+add_executable(ugv_rendezvous_node src/ugv_rendezvous_node.cpp)
+ament_target_dependencies(ugv_rendezvous_node
+  rclcpp
+  geometry_msgs
+  std_msgs
+  tf2_ros
+  tf2_geometry_msgs
+)
+
 install(TARGETS
   ugv_path_follower_node
+  ugv_rendezvous_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

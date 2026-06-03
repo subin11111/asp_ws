@@ -5,6 +5,7 @@ mission_manager_node:
 
     mission_start_topic: "/mission/start"
     mission_reset_topic: "/mission/reset"
+    mission_abort_topic: "/mission/abort"
 
     ugv_state_topic: "/ugv/state"
     ugv_mission_event_topic: "/ugv/mission_event"
@@ -20,6 +21,16 @@ mission_manager_node:
 
     uav_exploration_start_topic: "/uav/exploration_start"
     uav_exploration_complete_topic: "/mission/uav_exploration_complete"
-    auto_start_exploration: false
+    auto_start_exploration: true
+    start_uav_exploration_on_mission2_start: true
+
+    ugv_rendezvous_start_topic: "/ugv/rendezvous_start"
+    ugv_rendezvous_reached_topic: "/ugv/rendezvous_reached"
+    start_rendezvous_on_mission2_start: true
+    wait_both_uav_and_ugv_before_landing: true
+
+    precision_landing_start_topic: "/mission/precision_landing_start"
+    landing_complete_topic: "/status/landing_complete"
+    mission_complete_topic: "/mission/mission_complete"
 
     required_mission2_event: "MISSION2_START_REACHED"

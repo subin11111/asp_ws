@@ -31,9 +31,16 @@ run_topic_once() {
 
 run_section "/command/pose topic info" ros2 topic info -v /command/pose
 
+run_topic_once /mission/state
+run_topic_once /mission/status
+run_topic_once /ugv/mission_event
 run_topic_once /uav/mission2_takeoff_origin
 run_topic_once /uav/exploration_event
 run_topic_once /uav/exploration_state
+run_topic_once /ugv/rendezvous_start
+run_topic_once /ugv/rendezvous_reached
+run_topic_once /mission/uav_exploration_complete
+run_topic_once /mission/precision_landing_start
 run_topic_once /command/pose
 run_topic_once /debug/offboard/input_pose_enu
 run_topic_once /debug/offboard/local_pose_enu
@@ -50,7 +57,19 @@ run_section "static spawn coordinate references" \
     "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/tools"
 
 run_section "static safe path and prefix references" \
-  grep -Rni "uav_path_safe\\|takeoff_climb\\|safe_altitude\\|transition_" \
+  grep -Rni "uav_path_mission2_senior\\|uav_path_generated\\|uav_path_safe\\|takeoff_climb\\|safe_altitude\\|transition_" \
     "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/tools"
+
+run_section "static Mission2/Mission3 parallel start references" \
+  grep -Rni "start_rendezvous_on_mission2_start\\|PARALLEL_MISSION2_3_STARTED\\|UGV_RENDEZVOUS_START_PUBLISHED" \
+    "${WORKSPACE}/src/asp_mission_manager" "${WORKSPACE}/docs"
+
+run_section "static external origin one-shot latch references" \
+  grep -Rni "duplicate_origin_ignored\\|allow_external_origin_reanchor\\|mission2_px4_anchor" \
+    "${WORKSPACE}/src/utilities_pkg/px4_ros_com/src/examples/offboard" "${WORKSPACE}/docs"
+
+run_section "static Mission2 takeoff origin publish references" \
+  grep -Rni "republish_mission2_origin\\|MISSION2_TAKEOFF_ORIGIN_PUBLISHED_ONCE" \
+    "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/docs"
 
 echo "log_file=${LOG_FILE}" | tee -a "${LOG_FILE}"

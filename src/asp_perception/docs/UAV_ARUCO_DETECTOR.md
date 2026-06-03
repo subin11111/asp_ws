@@ -36,14 +36,32 @@ stamp,marker_id,source,camera_x,camera_y,camera_z,map_x,map_y,map_z
 
 camera_info가 들어오면 OpenCV ArUco pose estimation으로 marker의 camera frame 좌표를 계산한다. 이후 `camera_frame -> map_frame` TF가 있으면 map 좌표로 변환해 topic과 CSV에 기록한다.
 
-pose estimation 또는 TF 변환이 실패해도 marker ID와 annotated image publish는 계속 수행한다. 이 경우 map 좌표는 `nan`으로 기록한다.
+pose estimation 또는 TF 변환이 실패해도 marker ID, pixel center, annotated image,
+`marker_detections` publish는 계속 수행한다. 이 경우 JSON에는 `has_map=false`가 들어가고
+map 좌표는 `null`로 publish된다. CSV 기록에서만 duplicate suppression을 적용하며, topic
+publish 자체는 매 검출 frame 기준으로 유지한다.
 
 ## marker_detections 형식
 
 `/perception/uav/marker_detections`는 `marker_id` key를 포함한 구조화된 문자열로 publish한다.
 
 ```json
-{"marker_id":14,"source":"uav_camera","camera_x":0.12,"camera_y":-0.03,"camera_z":4.5,"map_x":-97.2,"map_y":67.4,"map_z":15.0}
+{
+  "marker_id": 14,
+  "source": "uav_camera",
+  "stamp": 123.45,
+  "center_u": 320.0,
+  "center_v": 240.0,
+  "image_width": 640,
+  "image_height": 480,
+  "camera_x": 0.12,
+  "camera_y": -0.03,
+  "camera_z": 4.5,
+  "map_x": -97.2,
+  "map_y": 67.4,
+  "map_z": 15.0,
+  "has_map": true
+}
 ```
 
 `asp_uav_control`의 exploration node는 `marker_id` 또는 `id` key만 marker ID로 파싱한다.

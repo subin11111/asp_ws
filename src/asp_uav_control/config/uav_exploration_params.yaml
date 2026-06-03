@@ -4,6 +4,16 @@ uav_exploration_node:
     use_safe_path: false
     safe_path_csv: ""
     dynamic_safe_prefix: true
+    continue_on_marker_timeout: true
+    marker_wait_timeout_sec: 3.0
+    hold_even_if_marker_detected: true
+    do_not_block_waypoint_progress_on_marker: true
+    waypoint_stuck_timeout_sec: 12.0
+    waypoint_progress_epsilon_m: 0.3
+    skip_close_waypoints: true
+    min_waypoint_separation: 4.0
+    max_same_waypoint_hold_sec: 12.0
+    max_total_hover_at_marker_sec: 8.0
     force_takeoff_before_path: true
     takeoff_mode: "relative"
     takeoff_relative_height: 8.0
@@ -19,10 +29,10 @@ uav_exploration_node:
     forbidden_spawn_y: 80.0
     forbidden_spawn_radius: 5.0
     safe_takeoff_relative_height: 5.0
-    safe_altitude: 18.0
+    safe_altitude: 22.0
     safe_altitude_after_takeoff: 18.0
-    transition_altitude: 18.0
-    max_transition_step: 15.0
+    transition_altitude: 24.0
+    max_transition_step: 12.0
     safe_prefix_hold_sec: 2.0
     safe_prefix_gimbal_pitch_deg: -60.0
 
@@ -46,6 +56,7 @@ uav_exploration_node:
     clear_origin_on_startup: true
     mission2_origin_map_frame: "map"
     mission2_origin_uav_frame: "x500_gimbal_0/base_link"
+    republish_mission2_origin: false
 
     marker_detections_topic: "/perception/uav/marker_detections"
     min_marker_id: 0
@@ -57,14 +68,16 @@ uav_exploration_node:
     required_start_states:
       - "UAV_EXPLORATION_READY"
       - "UAV_TAKEOFF_READY"
+      - "MISSION2_UAV_EXPLORATION_AND_UGV_RENDEZVOUS"
 
     pose_publish_rate_hz: 10.0
-    waypoint_tolerance: 1.0
-    yaw_tolerance_deg: 20.0
-    default_hold_sec: 3.0
+    waypoint_tolerance: 1.8
+    yaw_tolerance_deg: 45.0
+    ignore_yaw_for_waypoint_reached: true
+    default_hold_sec: 2.0
 
     complete_on_path_done: true
     minimum_unique_markers: 0
-    exploration_timeout_sec: 300.0
+    exploration_timeout_sec: 420.0
 
     resend_current_pose_before_start: false

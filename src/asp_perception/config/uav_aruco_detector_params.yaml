@@ -16,6 +16,9 @@ uav_aruco_detector_node:
 
     publish_debug_image: true
     write_csv: true
+    publish_detections_without_map: true
+    min_marker_id: 0
+    max_marker_id: 49
     csv_path: "/home/subin/ros2_ws/mission_logs/uav_marker_detections.csv"
 
     duplicate_suppression_distance_m: 0.5

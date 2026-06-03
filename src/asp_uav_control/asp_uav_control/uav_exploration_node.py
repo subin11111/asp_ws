@@ -4,7 +4,7 @@ import math
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -75,14 +75,23 @@ class UavExplorationNode(Node):
         self.state = ExplorationState.IDLE if self.scan_waypoints else ExplorationState.ERROR
         self.current_index = 0
         self.hold_start = None
+        self.current_waypoint_started_at = None
+        self.current_waypoint_marker_seen = False
+        self.current_waypoint_marker_timeout_sent = False
+        self.last_waypoint_progress_log = None
+        self.current_waypoint_best_distance = None
+        self.current_waypoint_last_progress_at = None
         self.takeoff_target: Optional[Waypoint] = None
         self.takeoff_hold_start = None
         self.path_following_started = False
         self.exploration_start_time = None
         self.complete_published = False
+        self.path_done_waiting_for_markers_reported = False
         self.unique_marker_ids: Set[int] = set()
+        self.last_marker_event_times: Dict[int, rclpy.time.Time] = {}
         self.current_pose: Optional[PoseStamped] = None
         self.mission2_origin_latched = False
+        self.mission2_origin_published = False
         self.mission2_origin_stamp = None
         self.mission2_origin_x = 0.0
         self.mission2_origin_y = 0.0
@@ -133,18 +142,36 @@ class UavExplorationNode(Node):
         self.declare_parameter('clear_origin_on_startup', True)
         self.declare_parameter('mission2_origin_map_frame', 'map')
         self.declare_parameter('mission2_origin_uav_frame', 'x500_gimbal_0/base_link')
+        self.declare_parameter('republish_mission2_origin', False)
         self.declare_parameter('marker_detections_topic', '/perception/uav/marker_detections')
         self.declare_parameter('start_on_launch', False)
         self.declare_parameter('start_on_mission_state', True)
         self.declare_parameter('required_start_state', 'UAV_EXPLORATION_READY')
-        self.declare_parameter('required_start_states', ['UAV_EXPLORATION_READY', 'UAV_TAKEOFF_READY'])
+        self.declare_parameter(
+            'required_start_states',
+            [
+                'UAV_EXPLORATION_READY',
+                'UAV_TAKEOFF_READY',
+                'MISSION2_UAV_EXPLORATION_AND_UGV_RENDEZVOUS',
+            ])
         self.declare_parameter('pose_publish_rate_hz', 10.0)
-        self.declare_parameter('waypoint_tolerance', 1.0)
-        self.declare_parameter('yaw_tolerance_deg', 20.0)
-        self.declare_parameter('default_hold_sec', 3.0)
+        self.declare_parameter('waypoint_tolerance', 1.8)
+        self.declare_parameter('yaw_tolerance_deg', 45.0)
+        self.declare_parameter('ignore_yaw_for_waypoint_reached', True)
+        self.declare_parameter('default_hold_sec', 2.0)
         self.declare_parameter('complete_on_path_done', True)
         self.declare_parameter('minimum_unique_markers', 0)
-        self.declare_parameter('exploration_timeout_sec', 300.0)
+        self.declare_parameter('exploration_timeout_sec', 420.0)
+        self.declare_parameter('continue_on_marker_timeout', True)
+        self.declare_parameter('marker_wait_timeout_sec', 3.0)
+        self.declare_parameter('hold_even_if_marker_detected', True)
+        self.declare_parameter('do_not_block_waypoint_progress_on_marker', True)
+        self.declare_parameter('waypoint_stuck_timeout_sec', 12.0)
+        self.declare_parameter('waypoint_progress_epsilon_m', 0.3)
+        self.declare_parameter('skip_close_waypoints', True)
+        self.declare_parameter('min_waypoint_separation', 4.0)
+        self.declare_parameter('max_same_waypoint_hold_sec', 12.0)
+        self.declare_parameter('max_total_hover_at_marker_sec', 8.0)
         self.declare_parameter('resend_current_pose_before_start', True)
         self.declare_parameter('use_safe_path', False)
         self.declare_parameter('safe_path_csv', '')
@@ -166,10 +193,10 @@ class UavExplorationNode(Node):
         self.declare_parameter('forbidden_spawn_y', 80.0)
         self.declare_parameter('forbidden_spawn_radius', 5.0)
         self.declare_parameter('safe_takeoff_relative_height', 5.0)
-        self.declare_parameter('safe_altitude', 18.0)
+        self.declare_parameter('safe_altitude', 22.0)
         self.declare_parameter('safe_altitude_after_takeoff', 18.0)
-        self.declare_parameter('transition_altitude', 18.0)
-        self.declare_parameter('max_transition_step', 15.0)
+        self.declare_parameter('transition_altitude', 24.0)
+        self.declare_parameter('max_transition_step', 12.0)
         self.declare_parameter('safe_prefix_hold_sec', 2.0)
         self.declare_parameter('safe_prefix_gimbal_pitch_deg', -60.0)
 
@@ -195,6 +222,7 @@ class UavExplorationNode(Node):
         self.clear_origin_on_startup = self.get_parameter('clear_origin_on_startup').value
         self.mission2_origin_map_frame = self.get_parameter('mission2_origin_map_frame').value
         self.mission2_origin_uav_frame = self.get_parameter('mission2_origin_uav_frame').value
+        self.republish_mission2_origin = self.get_parameter('republish_mission2_origin').value
         self.marker_detections_topic = self.get_parameter('marker_detections_topic').value
         self.start_on_launch = self.get_parameter('start_on_launch').value
         self.start_on_mission_state = self.get_parameter('start_on_mission_state').value
@@ -203,10 +231,27 @@ class UavExplorationNode(Node):
         self.pose_publish_rate_hz = float(self.get_parameter('pose_publish_rate_hz').value)
         self.waypoint_tolerance = float(self.get_parameter('waypoint_tolerance').value)
         self.yaw_tolerance_deg = float(self.get_parameter('yaw_tolerance_deg').value)
+        self.ignore_yaw_for_waypoint_reached = self.get_parameter(
+            'ignore_yaw_for_waypoint_reached').value
         self.default_hold_sec = float(self.get_parameter('default_hold_sec').value)
         self.complete_on_path_done = self.get_parameter('complete_on_path_done').value
         self.minimum_unique_markers = int(self.get_parameter('minimum_unique_markers').value)
         self.exploration_timeout_sec = float(self.get_parameter('exploration_timeout_sec').value)
+        self.continue_on_marker_timeout = self.get_parameter('continue_on_marker_timeout').value
+        self.marker_wait_timeout_sec = float(self.get_parameter('marker_wait_timeout_sec').value)
+        self.hold_even_if_marker_detected = self.get_parameter('hold_even_if_marker_detected').value
+        self.do_not_block_waypoint_progress_on_marker = self.get_parameter(
+            'do_not_block_waypoint_progress_on_marker').value
+        self.waypoint_stuck_timeout_sec = float(
+            self.get_parameter('waypoint_stuck_timeout_sec').value)
+        self.waypoint_progress_epsilon_m = float(
+            self.get_parameter('waypoint_progress_epsilon_m').value)
+        self.skip_close_waypoints = self.get_parameter('skip_close_waypoints').value
+        self.min_waypoint_separation = float(self.get_parameter('min_waypoint_separation').value)
+        self.max_same_waypoint_hold_sec = float(
+            self.get_parameter('max_same_waypoint_hold_sec').value)
+        self.max_total_hover_at_marker_sec = float(
+            self.get_parameter('max_total_hover_at_marker_sec').value)
         self.resend_current_pose_before_start = self.get_parameter(
             'resend_current_pose_before_start').value
         self.use_safe_path = self.get_parameter('use_safe_path').value
@@ -274,10 +319,44 @@ class UavExplorationNode(Node):
             for waypoint in waypoints
             if not self.is_static_safe_prefix_tag(waypoint.tag, waypoint)
         ]
+        scan_waypoints = self.remove_close_waypoints(scan_waypoints)
         removed_count = len(waypoints) - len(scan_waypoints)
         self.get_logger().info(f'Removed static/spawn prefix rows: {removed_count}')
         self.get_logger().info(f'Remaining scan waypoints: {len(scan_waypoints)}')
         return scan_waypoints
+
+    def remove_close_waypoints(self, waypoints: List[Waypoint]) -> List[Waypoint]:
+        if (
+            not self.skip_close_waypoints
+            or self.min_waypoint_separation <= 0.0
+            or len(waypoints) <= 1
+        ):
+            return waypoints
+
+        filtered: List[Waypoint] = []
+        removed = 0
+        for waypoint in waypoints:
+            if not filtered:
+                filtered.append(waypoint)
+                continue
+
+            previous = filtered[-1]
+            separation = math.hypot(waypoint.x - previous.x, waypoint.y - previous.y)
+            if separation < self.min_waypoint_separation:
+                previous.hold_sec = max(previous.hold_sec, waypoint.hold_sec)
+                removed += 1
+                self.publish_event(
+                    f'CLOSE_WAYPOINT_REMOVED:{waypoint.tag}:kept={previous.tag}:'
+                    f'distance={separation:.2f}')
+                continue
+
+            filtered.append(waypoint)
+
+        if removed:
+            self.get_logger().warn(
+                f'Removed {removed} close consecutive UAV waypoints below '
+                f'{self.min_waypoint_separation:.2f}m.')
+        return filtered
 
     def is_static_safe_prefix_tag(self, tag: str, waypoint: Optional[Waypoint] = None) -> bool:
         tag_lower = tag.lower()
@@ -303,6 +382,7 @@ class UavExplorationNode(Node):
 
     def clear_mission2_takeoff_origin(self):
         self.mission2_origin_latched = False
+        self.mission2_origin_published = False
         self.mission2_origin_stamp = None
         self.mission2_origin_x = 0.0
         self.mission2_origin_y = 0.0
@@ -345,6 +425,11 @@ class UavExplorationNode(Node):
         if msg.data.strip() != self.mission2_start_event:
             return
 
+        if self.mission2_origin_latched:
+            self.publish_event('MISSION2_TAKEOFF_ORIGIN_DUPLICATE_EVENT_IGNORED')
+            self.get_logger().warn('Mission2 takeoff origin is already latched. Duplicate event ignored.')
+            return
+
         origin_tf = self.lookup_tf(
             self.mission2_origin_map_frame, self.mission2_origin_uav_frame)
         if origin_tf is None:
@@ -366,6 +451,7 @@ class UavExplorationNode(Node):
         ):
             self.state = ExplorationState.MISSION2_ORIGIN_LATCHED
         self.publish_mission2_takeoff_origin()
+        self.publish_event('MISSION2_TAKEOFF_ORIGIN_PUBLISHED_ONCE')
         self.publish_event('MISSION2_TAKEOFF_ORIGIN_LATCHED')
         self.get_logger().info(
             'Mission2 takeoff origin latched from UAV TF: '
@@ -391,9 +477,20 @@ class UavExplorationNode(Node):
                     f'Ignoring out-of-range UAV marker ID: {marker_id}',
                     throttle_duration_sec=2.0)
                 continue
+            self.current_waypoint_marker_seen = True
             if marker_id not in self.unique_marker_ids:
                 self.unique_marker_ids.add(marker_id)
                 self.get_logger().info(f'Unique UAV marker recorded: {marker_id}')
+            if self.should_publish_marker_event(marker_id):
+                self.publish_event(f'MARKER_DETECTED:{marker_id}')
+
+    def should_publish_marker_event(self, marker_id: int) -> bool:
+        now = self.get_clock().now()
+        last = self.last_marker_event_times.get(marker_id)
+        if last is None or (now - last).nanoseconds / 1e9 >= 1.0:
+            self.last_marker_event_times[marker_id] = now
+            return True
+        return False
 
     def extract_marker_ids(self, text: str) -> List[int]:
         try:
@@ -483,12 +580,14 @@ class UavExplorationNode(Node):
 
         self.current_index = 0
         self.hold_start = None
+        self.reset_waypoint_progress_tracking()
         self.takeoff_hold_start = None
         self.path_following_started = False
         self.first_pose_published = False
         self.last_pose_publish_tag = None
         self.exploration_start_time = self.get_clock().now()
         self.complete_published = False
+        self.path_done_waiting_for_markers_reported = False
         self.get_logger().info(f'Exploration start reason: {reason}')
         self.publish_event('EXPLORATION_STARTED')
 
@@ -562,9 +661,11 @@ class UavExplorationNode(Node):
         self.log_start_path_summary()
         self.current_index = 0
         self.hold_start = None
+        self.reset_waypoint_progress_tracking()
         self.state = ExplorationState.EXPLORING
         self.path_following_started = True
         self.publish_event('PATH_FOLLOWING_STARTED')
+        self.publish_next_waypoint_event()
         return True
 
     def create_dynamic_safe_path(
@@ -651,8 +752,94 @@ class UavExplorationNode(Node):
     def clamp(self, value: float, minimum: float, maximum: float) -> float:
         return max(minimum, min(maximum, value))
 
+    def reset_waypoint_progress_tracking(self):
+        self.current_waypoint_started_at = self.get_clock().now()
+        self.current_waypoint_marker_seen = False
+        self.current_waypoint_marker_timeout_sent = False
+        self.last_waypoint_progress_log = None
+        self.current_waypoint_best_distance = None
+        self.current_waypoint_last_progress_at = self.get_clock().now()
+
+    def publish_next_waypoint_event(self):
+        if self.current_index < len(self.waypoints):
+            waypoint = self.waypoints[self.current_index]
+            self.publish_event(f'NEXT_WAYPOINT:{self.current_index}:{waypoint.tag}')
+
+    def marker_expected_for_waypoint(self, waypoint: Waypoint) -> bool:
+        tag = waypoint.tag.lower()
+        return (
+            'marker' in tag
+            or 'aruco' in tag
+            or 'scan' in tag
+            or 'action_1' in tag
+            or 'action_2' in tag
+        )
+
+    def current_waypoint_elapsed(self) -> float:
+        if self.current_waypoint_started_at is None:
+            return 0.0
+        return (self.get_clock().now() - self.current_waypoint_started_at).nanoseconds / 1e9
+
+    def waypoint_no_progress_elapsed(self) -> float:
+        if self.current_waypoint_last_progress_at is None:
+            return 0.0
+        return (self.get_clock().now() - self.current_waypoint_last_progress_at).nanoseconds / 1e9
+
+    def update_waypoint_progress(self, distance: float):
+        if self.current_waypoint_best_distance is None:
+            self.current_waypoint_best_distance = distance
+            self.current_waypoint_last_progress_at = self.get_clock().now()
+            return
+        if distance < self.current_waypoint_best_distance - self.waypoint_progress_epsilon_m:
+            self.current_waypoint_best_distance = distance
+            self.current_waypoint_last_progress_at = self.get_clock().now()
+
+    def waypoint_hold_limit(self, expected_marker: bool) -> float:
+        limits = []
+        if self.max_same_waypoint_hold_sec > 0.0:
+            limits.append(self.max_same_waypoint_hold_sec)
+        if expected_marker and self.max_total_hover_at_marker_sec > 0.0:
+            limits.append(self.max_total_hover_at_marker_sec)
+        return min(limits) if limits else 0.0
+
+    def advance_to_next_waypoint(self, event: str, waypoint: Waypoint):
+        self.publish_event(f'{event}:{waypoint.tag}')
+        self.current_index += 1
+        self.hold_start = None
+        self.state = ExplorationState.EXPLORING
+        self.reset_waypoint_progress_tracking()
+        if self.current_index >= len(self.waypoints):
+            self.finish_if_ready()
+            return
+        self.publish_next_waypoint_event()
+
+    def log_progress_condition(
+        self,
+        waypoint: Waypoint,
+        distance: float,
+        hold_elapsed: float,
+        expected_marker: bool):
+        key = (
+            self.current_index,
+            self.state.value,
+            int(distance * 10.0),
+            int(hold_elapsed),
+            self.current_waypoint_marker_seen,
+        )
+        if key == self.last_waypoint_progress_log:
+            return
+        self.last_waypoint_progress_log = key
+        self.get_logger().info(
+            'Waypoint progression check: '
+            f'index={self.current_index}, tag={waypoint.tag}, state={self.state.value}, '
+            f'distance={distance:.2f}, hold_elapsed={hold_elapsed:.2f}, '
+            f'hold_sec={waypoint.hold_sec:.2f}, marker_expected={expected_marker}, '
+            f'marker_seen={self.current_waypoint_marker_seen}, '
+            f'marker_timeout_sec={self.marker_wait_timeout_sec:.2f}, '
+            f'stuck_elapsed={self.current_waypoint_elapsed():.2f}')
+
     def timer_cb(self):
-        if self.mission2_origin_latched:
+        if self.mission2_origin_latched and self.republish_mission2_origin:
             self.publish_mission2_takeoff_origin()
 
         if self.state == ExplorationState.ERROR:
@@ -680,7 +867,7 @@ class UavExplorationNode(Node):
             if elapsed > self.exploration_timeout_sec:
                 self.state = ExplorationState.TIMEOUT
                 self.publish_complete(False)
-                self.publish_event('TIMEOUT')
+                self.publish_event('EXPLORATION_TIMEOUT')
                 self.publish_state()
                 return
 
@@ -721,19 +908,50 @@ class UavExplorationNode(Node):
         self.publish_waypoint(waypoint)
 
         distance = self.distance_to_waypoint(current_tf, waypoint)
+        self.update_waypoint_progress(distance)
+        expected_marker = self.marker_expected_for_waypoint(waypoint)
+        hold_elapsed = (
+            (self.get_clock().now() - self.hold_start).nanoseconds / 1e9
+            if self.hold_start is not None else 0.0
+        )
+        self.log_progress_condition(waypoint, distance, hold_elapsed, expected_marker)
+
+        if (
+            self.waypoint_stuck_timeout_sec > 0.0
+            and self.waypoint_no_progress_elapsed() >= self.waypoint_stuck_timeout_sec
+        ):
+            self.advance_to_next_waypoint('WAYPOINT_STUCK_SKIP', waypoint)
+            self.publish_state()
+            return
+
         if self.state != ExplorationState.HOLDING and distance <= self.waypoint_tolerance:
             self.state = ExplorationState.HOLDING
             self.hold_start = self.get_clock().now()
             self.publish_event(f'WAYPOINT_REACHED:{waypoint.tag}')
+            hold_elapsed = 0.0
 
         if self.state == ExplorationState.HOLDING:
             hold_elapsed = (self.get_clock().now() - self.hold_start).nanoseconds / 1e9
-            if hold_elapsed >= max(0.0, waypoint.hold_sec):
-                self.current_index += 1
-                self.hold_start = None
-                self.state = ExplorationState.EXPLORING
-                if self.current_index >= len(self.waypoints):
-                    self.finish_if_ready()
+            hold_limit = self.waypoint_hold_limit(expected_marker)
+            if (
+                expected_marker
+                and not self.current_waypoint_marker_seen
+                and self.continue_on_marker_timeout
+                and hold_elapsed >= self.marker_wait_timeout_sec
+            ):
+                if not self.current_waypoint_marker_timeout_sent:
+                    self.current_waypoint_marker_timeout_sent = True
+                    self.publish_event(f'MARKER_TIMEOUT_CONTINUE:{waypoint.tag}')
+                self.advance_to_next_waypoint('WAYPOINT_HOLD_COMPLETE', waypoint)
+            elif (
+                self.current_waypoint_marker_seen
+                and not self.hold_even_if_marker_detected
+            ):
+                self.advance_to_next_waypoint('WAYPOINT_HOLD_COMPLETE', waypoint)
+            elif hold_limit > 0.0 and hold_elapsed >= hold_limit:
+                self.advance_to_next_waypoint('WAYPOINT_STUCK_SKIP', waypoint)
+            elif hold_elapsed >= max(0.0, waypoint.hold_sec):
+                self.advance_to_next_waypoint('WAYPOINT_HOLD_COMPLETE', waypoint)
 
         self.publish_state()
 
@@ -857,10 +1075,13 @@ class UavExplorationNode(Node):
                     f'pose=({pose_x}, {pose_y}), '
                     f'origin=({self.mission2_origin_x}, {self.mission2_origin_y})')
                 return False
+            xy_error_x = pose_x - self.mission2_origin_x
+            xy_error_y = pose_y - self.mission2_origin_y
             self.publish_event(
                 'FIRST_TAKEOFF_POSE_CONFIRMED '
-                f'origin=({self.mission2_origin_x},{self.mission2_origin_y},{self.mission2_origin_z}) '
-                f'pose=({pose.pose.position.x},{pose.pose.position.y},{pose.pose.position.z})')
+                f'mission2_origin=({self.mission2_origin_x},{self.mission2_origin_y},{self.mission2_origin_z}) '
+                f'first_takeoff_pose=({pose.pose.position.x},{pose.pose.position.y},{pose.pose.position.z}) '
+                f'xy_error=({xy_error_x},{xy_error_y})')
 
         if (
             self.block_pose_if_xy_not_origin
@@ -917,6 +1138,12 @@ class UavExplorationNode(Node):
             self.publish_event('EXPLORATION_COMPLETE')
         else:
             self.state = ExplorationState.HOLDING
+            if not self.path_done_waiting_for_markers_reported:
+                self.path_done_waiting_for_markers_reported = True
+                self.publish_event(
+                    'PATH_DONE_WAITING_FOR_MARKERS '
+                    f'unique={len(self.unique_marker_ids)} '
+                    f'minimum={self.minimum_unique_markers}')
         self.publish_state()
 
     def publish_complete(self, value: bool):
@@ -930,6 +1157,8 @@ class UavExplorationNode(Node):
     def publish_mission2_takeoff_origin(self):
         if not self.mission2_origin_latched:
             return
+        if self.mission2_origin_published and not self.republish_mission2_origin:
+            return
         pose = PoseStamped()
         pose.header.stamp = (
             self.mission2_origin_stamp.to_msg()
@@ -942,18 +1171,39 @@ class UavExplorationNode(Node):
         pose.pose.position.z = self.mission2_origin_z
         pose.pose.orientation.w = 1.0
         self.mission2_origin_pub.publish(pose)
+        self.mission2_origin_published = True
 
     def publish_state(self):
         msg = String()
         status = {
             'state': self.state.value,
             'current_index': self.current_index,
+            'current_waypoint_tag': (
+                self.waypoints[self.current_index].tag
+                if self.current_index < len(self.waypoints) else None
+            ),
             'waypoints': len(self.waypoints),
             'scan_waypoints': len(self.scan_waypoints),
             'unique_markers': sorted(self.unique_marker_ids),
+            'current_waypoint_marker_seen': self.current_waypoint_marker_seen,
+            'continue_on_marker_timeout': self.continue_on_marker_timeout,
+            'marker_wait_timeout_sec': self.marker_wait_timeout_sec,
+            'do_not_block_waypoint_progress_on_marker':
+                self.do_not_block_waypoint_progress_on_marker,
+            'waypoint_stuck_timeout_sec': self.waypoint_stuck_timeout_sec,
+            'current_waypoint_elapsed_sec': self.current_waypoint_elapsed(),
+            'waypoint_no_progress_elapsed_sec': self.waypoint_no_progress_elapsed(),
+            'waypoint_best_distance': self.current_waypoint_best_distance,
+            'ignore_yaw_for_waypoint_reached': self.ignore_yaw_for_waypoint_reached,
+            'skip_close_waypoints': self.skip_close_waypoints,
+            'min_waypoint_separation': self.min_waypoint_separation,
+            'max_same_waypoint_hold_sec': self.max_same_waypoint_hold_sec,
+            'max_total_hover_at_marker_sec': self.max_total_hover_at_marker_sec,
             'takeoff_target_z': self.takeoff_target.z if self.takeoff_target else None,
             'path_following_started': self.path_following_started,
             'mission2_origin_latched': self.mission2_origin_latched,
+            'mission2_origin_published': self.mission2_origin_published,
+            'republish_mission2_origin': self.republish_mission2_origin,
             'mission2_takeoff_origin': {
                 'x': self.mission2_origin_x,
                 'y': self.mission2_origin_y,

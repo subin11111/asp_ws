@@ -89,6 +89,9 @@ private:
     declare_parameter<double>("marker_size_m", 0.5);
     declare_parameter<bool>("publish_debug_image", true);
     declare_parameter<bool>("write_csv", true);
+    declare_parameter<bool>("publish_detections_without_map", true);
+    declare_parameter<int>("min_marker_id", 0);
+    declare_parameter<int>("max_marker_id", 49);
     declare_parameter<std::string>(
       "csv_path", "/home/subin/ros2_ws/mission_logs/uav_marker_detections.csv");
     declare_parameter<double>("duplicate_suppression_distance_m", 0.5);
@@ -109,6 +112,9 @@ private:
     get_parameter("marker_size_m", marker_size_m_);
     get_parameter("publish_debug_image", publish_debug_image_);
     get_parameter("write_csv", write_csv_);
+    get_parameter("publish_detections_without_map", publish_detections_without_map_);
+    get_parameter("min_marker_id", min_marker_id_);
+    get_parameter("max_marker_id", max_marker_id_);
     get_parameter("csv_path", csv_path_);
     get_parameter("duplicate_suppression_distance_m", duplicate_distance_);
     get_parameter("duplicate_suppression_time_sec", duplicate_time_sec_);
@@ -199,8 +205,17 @@ private:
           std::numeric_limits<double>::quiet_NaN());
 
       auto map_point = transform_to_map(tvec, msg->header.stamp);
+      if (!is_marker_id_in_range(ids[i])) {
+        continue;
+      }
+      const bool has_map = point_has_map(map_point);
+      if (!has_map && !publish_detections_without_map_) {
+        continue;
+      }
+      const cv::Point2f center = marker_center(corners[i]);
       std_msgs::msg::String text_msg;
-      text_msg.data = make_detection_json(ids[i], tvec, map_point);
+      text_msg.data = make_detection_json(
+        ids[i], stamp_sec, center, msg->width, msg->height, tvec, map_point, has_map);
       detections_pub_->publish(text_msg);
 
       publish_marker_id(ids[i]);
@@ -271,6 +286,12 @@ private:
 
     geometry_msgs::msg::PointStamped map_point = camera_point;
     map_point.header.frame_id = map_frame_;
+    if (!std::isfinite(tvec[0]) || !std::isfinite(tvec[1]) || !std::isfinite(tvec[2])) {
+      map_point.point.x = std::numeric_limits<double>::quiet_NaN();
+      map_point.point.y = std::numeric_limits<double>::quiet_NaN();
+      map_point.point.z = std::numeric_limits<double>::quiet_NaN();
+      return map_point;
+    }
     try {
       map_point = tf_buffer_->transform(camera_point, map_frame_, tf2::durationFromSec(0.05));
     } catch (const tf2::TransformException & ex) {
@@ -284,9 +305,38 @@ private:
 
   void publish_marker_id(int id)
   {
+    if (!is_marker_id_in_range(id)) {
+      return;
+    }
     std_msgs::msg::Int32 msg;
     msg.data = id;
     marker_id_pub_->publish(msg);
+  }
+
+  bool is_marker_id_in_range(int id) const
+  {
+    return min_marker_id_ <= id && id <= max_marker_id_;
+  }
+
+  bool point_has_map(const geometry_msgs::msg::PointStamped & point) const
+  {
+    return std::isfinite(point.point.x) &&
+      std::isfinite(point.point.y) &&
+      std::isfinite(point.point.z);
+  }
+
+  cv::Point2f marker_center(const std::vector<cv::Point2f> & marker_corners) const
+  {
+    cv::Point2f center(0.0f, 0.0f);
+    if (marker_corners.empty()) {
+      return center;
+    }
+    for (const auto & corner : marker_corners) {
+      center += corner;
+    }
+    center.x /= static_cast<float>(marker_corners.size());
+    center.y /= static_cast<float>(marker_corners.size());
+    return center;
   }
 
   std::string json_number_or_null(double value) const
@@ -301,19 +351,30 @@ private:
 
   std::string make_detection_json(
     int id,
+    double stamp_sec,
+    const cv::Point2f & center,
+    uint32_t image_width,
+    uint32_t image_height,
     const cv::Vec3d & camera_point,
-    const geometry_msgs::msg::PointStamped & map_point) const
+    const geometry_msgs::msg::PointStamped & map_point,
+    bool has_map) const
   {
     std::ostringstream stream;
     stream << "{"
            << "\"marker_id\":" << id << ","
            << "\"source\":\"uav_camera\","
+           << "\"stamp\":" << stamp_sec << ","
+           << "\"center_u\":" << center.x << ","
+           << "\"center_v\":" << center.y << ","
+           << "\"image_width\":" << image_width << ","
+           << "\"image_height\":" << image_height << ","
            << "\"camera_x\":" << json_number_or_null(camera_point[0]) << ","
            << "\"camera_y\":" << json_number_or_null(camera_point[1]) << ","
            << "\"camera_z\":" << json_number_or_null(camera_point[2]) << ","
            << "\"map_x\":" << json_number_or_null(map_point.point.x) << ","
            << "\"map_y\":" << json_number_or_null(map_point.point.y) << ","
-           << "\"map_z\":" << json_number_or_null(map_point.point.z)
+           << "\"map_z\":" << json_number_or_null(map_point.point.z) << ","
+           << "\"has_map\":" << (has_map ? "true" : "false")
            << "}";
     return stream.str();
   }
@@ -411,6 +472,9 @@ private:
   double marker_size_m_{0.5};
   bool publish_debug_image_{true};
   bool write_csv_{true};
+  bool publish_detections_without_map_{true};
+  int min_marker_id_{0};
+  int max_marker_id_{49};
   std::string csv_path_;
   double duplicate_distance_{0.5};
   double duplicate_time_sec_{2.0};

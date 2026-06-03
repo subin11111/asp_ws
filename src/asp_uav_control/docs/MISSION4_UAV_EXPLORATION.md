@@ -20,7 +20,12 @@ mission_manager_node
 따라서 UAV는 아래 두 조건 중 하나가 들어온 뒤에만 waypoint 명령을 publish한다.
 
 * `/mission/state`가 `UAV_EXPLORATION_READY`가 된다.
+* `/mission/state`가 `MISSION2_UAV_EXPLORATION_AND_UGV_RENDEZVOUS`가 된다.
 * 수동으로 `/uav/exploration_start true`가 publish된다.
+
+전체 미션에서는 `mission_manager_node`가 `/ugv/mission_event: MISSION2_START_REACHED`를
+받는 순간 `/uav/exploration_start true`를 publish한다. 같은 순간 Mission3 UGV rendezvous도
+시작되므로, Mission2 UAV exploration과 Mission3 UGV rendezvous는 병렬로 진행된다.
 
 ## uav_path.csv 형식
 
@@ -32,6 +37,11 @@ x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag
 현재 `path/uav_path.csv`는 원본 CSV
 `/home/subin/Autonomous-System-Platform-final-project/uav_controller/path/uav_path.csv`를
 이 패키지의 `x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag` 형식으로 변환한 것이다.
+
+Mission2 실사용 runtime path는 `path/uav_path_mission2_senior.csv`이다. 이 파일은 선배 팀
+waypoint를 Mission2용으로 고정한 경로이며, marker pose 기반 generated path처럼
+`wall_E/W/N/S` 후보를 촘촘하게 돌지 않는다. `uav_path_generated.csv`와
+`uav_path_mission2.csv`는 marker 배치 확인과 path 설계 참고용으로만 둔다.
 
 변환 규칙:
 
@@ -86,6 +96,34 @@ final_px4_setpoint_ned = mission2_px4_anchor_ned + delta_ned
 다만 WP CSV는 현재 맵과 완전히 맞지 않는 구간이 있어, 실제 장애물/marker 배치 기준으로
 좌표와 yaw, gimbal pitch를 추가 보정해야 한다. ArUco marker detection 노드의 실제 연동은
 아직 별도로 확인하지 않았다.
+
+## Marker timeout and waypoint progression
+
+marker detection은 waypoint 진행을 막지 않는다. `marker_detections_cb`는 marker ID 기록과
+`MARKER_DETECTED:<id>` event publish만 담당한다. UAV는 waypoint에 도착하면 hold를 시작하고,
+marker가 보이면 기록한 뒤 hold 완료까지 유지하고 다음 waypoint로 간다. marker가 보이지 않는
+scan waypoint에서는 `marker_wait_timeout_sec` 이후 `MARKER_TIMEOUT_CONTINUE:<tag>` event를
+publish하고 다음 waypoint로 넘어간다.
+
+연속 waypoint가 `min_waypoint_separation`보다 가까우면 runtime load 단계에서 뒤쪽 waypoint를
+제거하고 `CLOSE_WAYPOINT_REMOVED:<tag>` event를 기록한다. `ignore_yaw_for_waypoint_reached`
+기본값은 true이므로 yaw가 맞지 않는다는 이유만으로 같은 waypoint 주변을 계속 돌지 않는다.
+
+진행 관련 event는 다음과 같다.
+
+```text
+MARKER_DETECTED:<id>
+MARKER_TIMEOUT_CONTINUE:<tag>
+WAYPOINT_HOLD_COMPLETE:<tag>
+NEXT_WAYPOINT:<index>:<tag>
+CLOSE_WAYPOINT_REMOVED:<tag>
+WAYPOINT_STUCK_SKIP:<tag>
+EXPLORATION_TIMEOUT
+```
+
+같은 waypoint에서 진행 개선이 `waypoint_stuck_timeout_sec` 이상 없거나 hold 시간이
+`max_same_waypoint_hold_sec`를 넘으면 `WAYPOINT_STUCK_SKIP:<tag>`로 강제 skip한다. 이 정책
+때문에 첫 marker를 못 찾거나 marker 인식이 늦어도 전체 senior path는 계속 진행한다.
 
 ## Forced takeoff before path
 
@@ -164,10 +202,34 @@ runtime에서 다시 구성한다.
 * UAV는 spawn 위치나 launch 시점 위치에서 이륙하지 않는다.
 * UAV는 반드시 `/ugv/mission_event: MISSION2_START_REACHED` 순간의 UAV TF를 Mission2 takeoff origin으로 저장한다.
 * `/uav/mission2_takeoff_origin`이 publish되지 않으면 UAV exploration은 시작하지 않는다.
+* `uav_exploration_node`는 기본적으로 `/uav/mission2_takeoff_origin`을 한 번만 publish한다.
+* 같은 Mission2 event가 반복되면 기존 Mission2 takeoff origin을 유지하고 `MISSION2_TAKEOFF_ORIGIN_DUPLICATE_EVENT_IGNORED`를 publish한다.
 * 첫 `/command/pose`는 반드시 `mission2_takeoff_origin`의 x/y와 같고 z만 증가해야 한다.
+* 첫 takeoff pose가 확인되면 `FIRST_TAKEOFF_POSE_CONFIRMED` event에 `mission2_origin`, `first_takeoff_pose`, `xy_error`를 함께 기록한다.
 * CSV는 takeoff 완료 후 scan waypoint 후보로만 사용한다.
 * `/command/pose` publish는 guard를 통과해야 하며, 잘못된 x/y는 `POSE_BLOCKED_*` event로 차단된다.
 * `offboard_control`도 `/uav/mission2_takeoff_origin` 없이 `/command/pose`를 PX4로 보내지 않는다.
+* `offboard_control`은 첫 `/uav/mission2_takeoff_origin`에서 map anchor와 PX4 local anchor를 함께 latch한다.
+* `allow_external_origin_reanchor: false`에서는 반복 origin message가 들어와도 `mission2_px4_anchor_ned`를 바꾸지 않는다.
+* `/mission/reset true`가 들어오면 latch된 external origin anchor를 clear하고 다음 mission에서 다시 한 번 latch한다.
+
+Mission2 origin one-shot 관련 파라미터:
+
+```yaml
+republish_mission2_origin: false
+allow_external_origin_reanchor: false
+clear_origin_on_mission_reset: true
+external_origin_duplicate_tolerance_m: 0.2
+```
+
+런타임 확인 포인트:
+
+```text
+/uav/exploration_event: MISSION2_TAKEOFF_ORIGIN_PUBLISHED_ONCE
+/uav/exploration_event: FIRST_TAKEOFF_POSE_CONFIRMED mission2_origin=(...) first_takeoff_pose=(...) xy_error=(...)
+/debug/offboard/frame_report: last_origin_msg_ignored=true
+/debug/offboard/frame_report: duplicate_origin_ignored_count=<n>
+```
 
 ## Mission2 latch 실행 순서
 
@@ -181,7 +243,7 @@ runtime에서 다시 구성한다.
 6. UGV가 Mission2 시작 지점에 도착
 7. `/ugv/mission_event`에 `MISSION2_START_REACHED` 발생
 8. `uav_exploration_node`가 이 event를 받아 Mission2 takeoff origin latch
-9. `/mission/state`가 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`가 되거나 수동 start 입력
+9. `mission_manager_node`가 `/uav/exploration_start true`와 `/ugv/rendezvous_start true`를 publish
 10. UAV가 latched origin의 x/y에서 먼저 상승
 11. 이후 CSV scan waypoint 수행
 
@@ -296,8 +358,9 @@ waypoint 방향으로 단계적으로 이동한다.
 현재 위치에서 이륙해야 한다. 최초 spawn 위치 기준으로 만들어진 정적 `uav_path_safe.csv`를
 그대로 런타임에서 사용하면 안 된다. 이 파일은 정적 후보/과거 산출물로만 둔다.
 
-`uav_exploration_safe.launch.py`는 `uav_path_generated.csv`를 scan waypoint 후보로 읽고,
-runtime에서 현재 TF 기준 forced takeoff와 dynamic transition을 적용한다.
+`uav_exploration_mission2.launch.py`와 `uav_exploration_safe.launch.py`는
+`uav_path_mission2_senior.csv`를 scan waypoint 후보로 읽고, runtime에서 현재 TF 기준 forced
+takeoff와 dynamic transition을 적용한다.
 `dynamic_safe_prefix: true`일 때 CSV 내부의 `takeoff_climb`, `safe_altitude`, `transition_*`
 row는 scan waypoint에서 제거된다.
 Mission2 이후 시작 state는 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`를 허용하며,
@@ -333,7 +396,7 @@ ros2 launch asp_uav_control uav_exploration_generated.launch.py
 
 `uav_path_generated.csv`는 최종 경로가 아니라 후보 경로이다. launch 로그에서
 `UAV exploration path_csv`와 `First waypoint`를 확인해 실제 어떤 CSV가 로드됐는지 먼저 확인한다.
-generated launch도 launch 직후 자동 시작되지 않으며, `/uav/exploration_start true` 또는
+generated 전용 launch도 launch 직후 자동 시작되지 않으며, `/uav/exploration_start true` 또는
 FSM state `UAV_EXPLORATION_READY`가 있어야 waypoint publish를 시작한다.
 
 launch 직후에는 `/command/pose`가 publish되지 않아야 한다. FSM 연동으로 시작하려면
@@ -458,8 +521,13 @@ bash tools/diagnostics/uav_pose_source_audit.sh
 
 ```text
 waypoint_tolerance
+ignore_yaw_for_waypoint_reached
 default_hold_sec
+marker_wait_timeout_sec
+waypoint_stuck_timeout_sec
+min_waypoint_separation
+max_same_waypoint_hold_sec
 exploration_timeout_sec
 minimum_unique_markers
-uav_path.csv waypoint 좌표, yaw, gimbal pitch
+uav_path_mission2_senior.csv waypoint 좌표, yaw, gimbal pitch
 ```

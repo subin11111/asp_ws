@@ -1,0 +1,24 @@
+ugv_rendezvous_node:
+  ros__parameters:
+    start_topic: "/ugv/rendezvous_start"
+    rendezvous_reached_topic: "/ugv/rendezvous_reached"
+    path_csv: ""
+    cmd_vel_topic: "/command/ugv_cmd_vel"
+    map_frame: "map"
+    base_frame: "X1_asp/base_link"
+    control_rate_hz: 20.0
+    waypoint_tolerance: 1.2
+    final_tolerance: 1.4
+    lookahead_distance: 3.5
+    max_linear_speed: 1.4
+    cruise_speed: 1.1
+    min_linear_speed: 0.35
+    max_angular_speed: 1.4
+    kp_heading: 1.6
+    kp_distance: 0.8
+    slow_down_distance: 2.0
+    heading_slowdown_cos_threshold: 0.2
+    allow_reverse: false
+    stuck_timeout_sec: 20.0
+    progress_epsilon_m: 0.4
+    zero_publish_after_complete_count: 5

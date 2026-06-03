@@ -21,3 +21,5 @@ ugv_path_follower_node:
 
     slow_down_distance: 2.0
     final_stop_mission_type: 2
+    zero_publish_after_stop_count: 5
+    disable_cmd_after_stop: true
