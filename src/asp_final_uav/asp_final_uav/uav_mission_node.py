@@ -77,10 +77,11 @@ class UavMissionNode(Node):
                 ("do_not_block_waypoint_progress_on_marker", True),
                 ("landing_hover_altitude_m", 4.0),
                 ("landing_descent_step_m", 1.0),
-                ("landing_complete_altitude_m", 3.0),
+                ("landing_complete_altitude_m", 0.0),
                 ("landing_timeout_s", 30.0),
                 ("landing_detection_timeout_s", 2.0),
-                ("landing_approach_altitude_m", 8.0),
+                ("landing_approach_altitude_m", 3.0),
+                ("landing_touchdown_setpoint_m", 0.0),
                 ("landing_xy_tolerance_m", 1.0),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
@@ -107,6 +108,8 @@ class UavMissionNode(Node):
         self.takeoff_origin = None
         self.landing_target_xy = None
         self.landing_started = self.now()
+        self.landing_land_started = None
+        self.landing_complete_published = False
 
         self.cmd_pose_pub = self.create_publisher(PoseStamped, "/asp_final/uav/cmd_pose", 10)
         self.land_pub = self.create_publisher(Bool, "/asp_final/uav/land", 10)
@@ -233,6 +236,8 @@ class UavMissionNode(Node):
         self.last_landing_detection = None
         self.last_landing_detection_time = None
         self.last_ugv_landing_xy = None
+        self.landing_land_started = None
+        self.landing_complete_published = False
         self.publish_text(self.landing_event_pub, "landing_started")
 
     def tick(self):
@@ -318,7 +323,9 @@ class UavMissionNode(Node):
 
         if self.phase == "landing":
             self.publish_text(self.landing_state_pub, "landing")
-            ugv_xy = self.current_ugv_landing_xy()
+            ugv_pose = self.current_ugv_landing_pose()
+            ugv_xy = (ugv_pose[0], ugv_pose[1]) if ugv_pose is not None else None
+            landing_yaw = ugv_pose[2] if ugv_pose is not None else yaw
             if ugv_xy is not None:
                 self.landing_target_xy = ugv_xy
             elif self.landing_target_xy is None:
@@ -335,7 +342,9 @@ class UavMissionNode(Node):
             target_z = max(complete_alt, z - descent_step)
             if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value):
                 target_z = max(float(self.get_parameter("landing_approach_altitude_m").value), z - descent_step)
-            self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, yaw))
+            if self.landing_land_started is not None:
+                target_z = float(self.get_parameter("landing_touchdown_setpoint_m").value)
+            self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
             ready_to_land = (
                 z <= complete_alt
                 and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
@@ -346,10 +355,14 @@ class UavMissionNode(Node):
                 and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
             )
             if ready_to_land or timed_out_on_target:
+                if self.landing_land_started is None:
+                    self.landing_land_started = self.now()
+                    self.publish_text(self.landing_event_pub, "landing_land_command_started")
                 self.publish_bool(self.land_pub)
-                self.publish_bool(self.landing_complete_pub)
-                self.phase = "complete"
-                self.publish_text(self.landing_event_pub, "landing_complete")
+                if not self.landing_complete_published:
+                    self.publish_bool(self.landing_complete_pub)
+                    self.landing_complete_published = True
+                    self.publish_text(self.landing_event_pub, "landing_complete")
 
     def select_landing_detection(self, data):
         detections = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
@@ -369,13 +382,18 @@ class UavMissionNode(Node):
         return None
 
     def current_ugv_landing_xy(self):
+        pose = self.current_ugv_landing_pose()
+        return (pose[0], pose[1]) if pose is not None else self.last_ugv_landing_xy
+
+    def current_ugv_landing_pose(self):
         last_error = None
         for frame in (self.ugv_landing_frame, self.ugv_base_frame):
             try:
                 transform = self.tf_buffer.lookup_transform(self.map_frame, frame, rclpy.time.Time())
                 pos = transform.transform.translation
+                yaw = yaw_from_quaternion(transform.transform.rotation)
                 self.last_ugv_landing_xy = (pos.x, pos.y)
-                return self.last_ugv_landing_xy
+                return pos.x, pos.y, yaw
             except TransformException as exc:
                 last_error = (frame, exc)
         if last_error is not None:
@@ -384,7 +402,7 @@ class UavMissionNode(Node):
                 f"Waiting for UGV landing TF {self.map_frame}->{frame}: {exc}",
                 throttle_duration_sec=2.0,
             )
-        return self.last_ugv_landing_xy
+        return None
 
     def landing_detection_has_map(self):
         if not self.last_landing_detection or not self.last_landing_detection.get("has_map", False):
@@ -419,7 +437,6 @@ class UavMissionNode(Node):
         min_z = float(self.get_parameter("transition_corridor_min_cruise_altitude").value)
         max_z = float(self.get_parameter("transition_corridor_max_cruise_altitude").value)
         cruise_z = max(min_z, min(first_wp.z, max_z))
-        max_step = max(1.0, float(self.get_parameter("transition_corridor_max_step_m").value))
         hold_sec = max(0.0, float(self.get_parameter("transition_corridor_hold_sec").value))
         pitch = float(self.get_parameter("transition_corridor_gimbal_pitch_deg").value)
         tag_prefix = str(self.get_parameter("transition_corridor_tag_prefix").value)
@@ -431,17 +448,6 @@ class UavMissionNode(Node):
 
         if start_z < cruise_z - 0.1:
             append_transition(start_x, start_y, cruise_z, first_wp.yaw)
-
-        distance = math.hypot(first_wp.x - start_x, first_wp.y - start_y)
-        segment_count = max(1, math.ceil(distance / max_step))
-        for index in range(1, segment_count):
-            ratio = index / segment_count
-            next_ratio = min(1.0, (index + 1) / segment_count)
-            x = start_x + (first_wp.x - start_x) * ratio
-            y = start_y + (first_wp.y - start_y) * ratio
-            next_x = start_x + (first_wp.x - start_x) * next_ratio
-            next_y = start_y + (first_wp.y - start_y) * next_ratio
-            append_transition(x, y, cruise_z, math.atan2(next_y - y, next_x - x))
 
         self.publish_text(
             self.exploration_event_pub,

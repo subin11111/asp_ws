@@ -1177,3 +1177,67 @@ python3 -m py_compile \
 colcon build --packages-select \
   asp_final_mission asp_final_uav asp_final_ugv
 ```
+
+## 변경 기록: Final UAV 착륙 yaw 정렬 및 landing 유지 보강
+
+작성 시각: `2026-06-05 01:29:44 KST`
+
+Final UAV landing phase에서 UGV 위 착륙 정렬과 착륙 후 모터 정지를 보강했다.
+
+착륙 위치는 기존처럼 UGV landing marker TF를 우선 사용하고, 없으면 UGV base TF를 사용한다.
+이번 변경에서는 해당 TF의 yaw도 함께 읽어 landing command pose에 반영한다.
+
+```text
+X1_asp/aruco_marker_10_link
+  -> 없으면 X1_asp/base_link
+```
+
+따라서 landing phase에서는 `target_x`, `target_y`뿐 아니라 UGV/landing marker 방향도 맞춰 내려간다.
+TF를 읽지 못한 경우에는 UAV 현재 yaw를 유지한다.
+
+Mission2 시작 직후 첫 waypoint로 가기 전 자동 생성되던 수평 transition waypoint도 제거했다.
+z축 고도 확보용 transition은 유지하되, 시작점과 첫 marker waypoint 사이를 `transition_corridor_max_step_m`
+간격으로 쪼개는 중간 waypoint는 더 이상 만들지 않는다.
+
+```text
+현재 위치에서 cruise_z 확보
+  -> marker_7_roof_detect
+```
+
+착륙 phase에서는 land command가 한 번만 publish되고 `complete`로 빠지는 문제를 줄이도록,
+land 조건이 만족된 뒤에도 landing phase를 유지하며 `/asp_final/uav/land true`를 계속 publish한다.
+`/asp_final/landing/complete`는 한 번만 publish한다.
+
+```yaml
+landing_complete_altitude_m: 0.02
+landing_approach_altitude_m: 3.0
+landing_touchdown_setpoint_m: 0.0
+```
+
+PX4 bridge는 `/fmu/out/vehicle_land_detected`를 구독한다. `/asp_final/uav/land true` 이후
+`vehicle_land_detected.landed=true`가 일정 시간 유지되면 PX4 disarm 명령을 보낸다.
+이 보강은 착륙 요청 이후에만 동작한다.
+
+```yaml
+auto_disarm_after_landed: true
+landed_disarm_delay_sec: 1.0
+```
+
+최종 변경 파일은 다음과 같다.
+
+```text
+src/asp_final_uav/asp_final_uav/uav_mission_node.py
+src/asp_final_uav/config/uav_params.yaml
+src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+```
+
+검증은 다음 명령으로 확인했다.
+
+```bash
+python3 -m py_compile \
+  src/asp_final_uav/asp_final_uav/uav_mission_node.py \
+  src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+
+colcon build --packages-select \
+  asp_final_uav asp_final_px4_bridge
+```

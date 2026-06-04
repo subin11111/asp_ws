@@ -9,6 +9,7 @@ from px4_msgs.msg import (
     VehicleCommand,
     VehicleCommandAck,
     VehicleControlMode,
+    VehicleLandDetected,
     VehicleLocalPosition,
     VehicleStatus,
 )
@@ -41,6 +42,8 @@ class Px4OffboardBridge(Node):
                 ("fast_climb_velocity_feedforward_mps", 8.0),
                 ("fast_climb_acceleration_feedforward_mps2", 4.0),
                 ("fast_climb_error_threshold_m", 1.0),
+                ("auto_disarm_after_landed", True),
+                ("landed_disarm_delay_sec", 1.0),
             ],
         )
         self.last_pose = None
@@ -58,6 +61,10 @@ class Px4OffboardBridge(Node):
         self.last_arm_request_ns = 0
         self.last_setpoint_log_ns = 0
         self.last_status_pub_ns = 0
+        self.land_requested = False
+        self.disarm_after_land_sent = False
+        self.landed_since_ns = 0
+        self.land_detected = None
         self.px4_offboard_enabled = False
         self.px4_armed_flag = False
 
@@ -85,6 +92,7 @@ class Px4OffboardBridge(Node):
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status", self.on_vehicle_status, qos_profile_sensor_data)
         self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1", self.on_vehicle_status, qos_profile_sensor_data)
         self.create_subscription(VehicleControlMode, "/fmu/out/vehicle_control_mode", self.on_vehicle_control_mode, qos_profile_sensor_data)
+        self.create_subscription(VehicleLandDetected, "/fmu/out/vehicle_land_detected", self.on_land_detected, qos_profile_sensor_data)
         self.create_subscription(VehicleCommandAck, "/fmu/out/vehicle_command_ack", self.on_vehicle_command_ack, qos_profile_sensor_data)
         self.timer = self.create_timer(1.0 / float(self.get_parameter("setpoint_rate_hz").value), self.tick)
         self.get_logger().info("asp_final PX4 offboard bridge ready")
@@ -181,7 +189,16 @@ class Px4OffboardBridge(Node):
 
     def on_land(self, msg):
         if msg.data:
+            self.land_requested = True
             self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+
+    def on_land_detected(self, msg):
+        self.land_detected = msg
+        if msg.landed:
+            if self.landed_since_ns == 0:
+                self.landed_since_ns = self.get_clock().now().nanoseconds
+        else:
+            self.landed_since_ns = 0
 
     def set_px4_anchor_from_local_position(self):
         if self.local_position is None:
@@ -304,6 +321,11 @@ class Px4OffboardBridge(Node):
             "setpoint_counter": self.setpoint_counter,
             "px4_offboard": self.px4_in_offboard(),
             "px4_armed": self.px4_armed(),
+            "land_requested": self.land_requested,
+            "land_detected_landed": bool(self.land_detected and self.land_detected.landed),
+            "land_detected_ground_contact": bool(self.land_detected and self.land_detected.ground_contact),
+            "land_detected_at_rest": bool(self.land_detected and self.land_detected.at_rest),
+            "disarm_after_land_sent": self.disarm_after_land_sent,
             "nav_state": int(self.vehicle_status.nav_state) if self.vehicle_status else None,
             "arming_state": int(self.vehicle_status.arming_state) if self.vehicle_status else None,
             "last_ack_command": int(self.last_command_ack.command) if self.last_command_ack else None,
@@ -315,6 +337,19 @@ class Px4OffboardBridge(Node):
         self.status_pub.publish(msg)
 
     def tick(self):
+        if (
+            self.land_requested
+            and bool(self.get_parameter("auto_disarm_after_landed").value)
+            and not self.disarm_after_land_sent
+            and self.px4_armed()
+            and self.landed_since_ns > 0
+        ):
+            delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)
+            if self.get_clock().now().nanoseconds - self.landed_since_ns >= delay_ns:
+                self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
+                self.disarm_after_land_sent = True
+                self.get_logger().info("Requested PX4 DISARM after vehicle_land_detected.landed=true")
+
         offboard = OffboardControlMode()
         offboard.timestamp = self.timestamp_us()
         offboard.position = True
