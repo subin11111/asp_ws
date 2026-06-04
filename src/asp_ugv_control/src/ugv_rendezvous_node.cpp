@@ -111,6 +111,7 @@ private:
     declare_parameter<double>("slow_down_distance", 2.0);
     declare_parameter<double>("heading_slowdown_cos_threshold", 0.2);
     declare_parameter<bool>("allow_reverse", false);
+    declare_parameter<double>("start_delay_sec", 1.5);
     declare_parameter<double>("stuck_timeout_sec", 20.0);
     declare_parameter<double>("progress_epsilon_m", 0.4);
     declare_parameter<int>("zero_publish_after_complete_count", 5);
@@ -137,6 +138,7 @@ private:
     get_parameter("slow_down_distance", slow_down_distance_);
     get_parameter("heading_slowdown_cos_threshold", heading_slowdown_cos_threshold_);
     get_parameter("allow_reverse", allow_reverse_);
+    get_parameter("start_delay_sec", start_delay_sec_);
     get_parameter("stuck_timeout_sec", stuck_timeout_sec_);
     get_parameter("progress_epsilon_m", progress_epsilon_m_);
     get_parameter("zero_publish_after_complete_count", zero_publish_after_complete_count_);
@@ -150,6 +152,7 @@ private:
     max_angular_speed_ = std::max(0.0, max_angular_speed_);
     slow_down_distance_ = std::max(0.1, slow_down_distance_);
     heading_slowdown_cos_threshold_ = clamp(heading_slowdown_cos_threshold_, -1.0, 1.0);
+    start_delay_sec_ = std::max(0.0, start_delay_sec_);
     stuck_timeout_sec_ = std::max(0.0, stuck_timeout_sec_);
     progress_epsilon_m_ = std::max(0.0, progress_epsilon_m_);
     zero_publish_after_complete_count_ = std::max(0, zero_publish_after_complete_count_);
@@ -207,19 +210,31 @@ private:
     if (!msg->data || !path_loaded_ || completed_) {
       return;
     }
-    if (!active_) {
-      active_ = true;
-      current_index_ = 0;
-      current_waypoint_started_at_ = now();
-      last_progress_time_ = now();
-      best_distance_to_waypoint_ = std::numeric_limits<double>::infinity();
-      publish_event("RENDEZVOUS_STARTED");
-      publish_state("RUNNING");
+    if (active_ || start_delay_active_) {
+      return;
     }
+    if (start_delay_sec_ <= 0.0) {
+      begin_rendezvous();
+      return;
+    }
+    start_delay_active_ = true;
+    start_delay_started_at_ = now();
+    publish_zero_twist();
+    publish_event("RENDEZVOUS_START_DELAY_STARTED");
+    publish_state("RENDEZVOUS_START_DELAY");
+    RCLCPP_INFO(
+      get_logger(),
+      "UGV rendezvous start delayed for %.2f seconds after start signal.",
+      start_delay_sec_);
   }
 
   void control_loop()
   {
+    if (start_delay_active_ && !completed_) {
+      handle_start_delay();
+      return;
+    }
+
     if (!active_ || completed_) {
       publish_state(completed_ ? "COMPLETE" : "IDLE");
       return;
@@ -347,6 +362,36 @@ private:
     cmd_pub_->publish(cmd);
   }
 
+  void handle_start_delay()
+  {
+    publish_zero_twist();
+    publish_state("RENDEZVOUS_START_DELAY");
+
+    const double elapsed = (now() - start_delay_started_at_).seconds();
+    if (elapsed < start_delay_sec_) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 500,
+        "Waiting %.2f/%.2f seconds before UGV rendezvous motion.",
+        elapsed, start_delay_sec_);
+      return;
+    }
+
+    start_delay_active_ = false;
+    publish_event("RENDEZVOUS_START_DELAY_COMPLETE");
+    begin_rendezvous();
+  }
+
+  void begin_rendezvous()
+  {
+    active_ = true;
+    current_index_ = 0;
+    current_waypoint_started_at_ = now();
+    last_progress_time_ = now();
+    best_distance_to_waypoint_ = std::numeric_limits<double>::infinity();
+    publish_event("RENDEZVOUS_STARTED");
+    publish_state("RUNNING");
+  }
+
   void complete_rendezvous()
   {
     publish_zero_twist_burst(zero_publish_after_complete_count_);
@@ -409,13 +454,16 @@ private:
   double slow_down_distance_{2.0};
   double heading_slowdown_cos_threshold_{0.2};
   bool allow_reverse_{false};
+  double start_delay_sec_{1.5};
   double stuck_timeout_sec_{20.0};
   double progress_epsilon_m_{0.4};
   int zero_publish_after_complete_count_{5};
   bool path_loaded_{false};
   bool active_{false};
   bool completed_{false};
+  bool start_delay_active_{false};
   size_t current_index_{0};
+  rclcpp::Time start_delay_started_at_{0, 0, RCL_ROS_TIME};
   rclcpp::Time current_waypoint_started_at_{0, 0, RCL_ROS_TIME};
   rclcpp::Time last_progress_time_{0, 0, RCL_ROS_TIME};
   double best_distance_to_waypoint_{std::numeric_limits<double>::infinity()};

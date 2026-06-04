@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -21,9 +22,6 @@ class ExplorationState(str, Enum):
     WAITING_FOR_MISSION2_ORIGIN = 'WAITING_FOR_MISSION2_ORIGIN'
     MISSION2_ORIGIN_LATCHED = 'MISSION2_ORIGIN_LATCHED'
     READY = 'READY'
-    TAKEOFF_CLIMB = 'TAKEOFF_CLIMB'
-    TAKEOFF_HOLD = 'TAKEOFF_HOLD'
-    TAKEOFF_COMPLETE = 'TAKEOFF_COMPLETE'
     EXPLORING = 'EXPLORING'
     HOLDING = 'HOLDING'
     WAYPOINT_REACHED = 'WAYPOINT_REACHED'
@@ -69,7 +67,10 @@ class UavExplorationNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.raw_waypoints: List[Waypoint] = self.load_path(self.path_csv)
+        self.runtime_path_valid = self.validate_runtime_path(self.path_csv)
+        self.raw_waypoints: List[Waypoint] = (
+            self.load_path(self.path_csv) if self.runtime_path_valid else []
+        )
         self.scan_waypoints: List[Waypoint] = self.filter_scan_waypoints(self.raw_waypoints)
         self.waypoints: List[Waypoint] = []
         self.state = ExplorationState.IDLE if self.scan_waypoints else ExplorationState.ERROR
@@ -81,8 +82,6 @@ class UavExplorationNode(Node):
         self.last_waypoint_progress_log = None
         self.current_waypoint_best_distance = None
         self.current_waypoint_last_progress_at = None
-        self.takeoff_target: Optional[Waypoint] = None
-        self.takeoff_hold_start = None
         self.path_following_started = False
         self.exploration_start_time = None
         self.complete_published = False
@@ -125,6 +124,8 @@ class UavExplorationNode(Node):
 
     def declare_params(self):
         self.declare_parameter('path_csv', '')
+        self.declare_parameter('allow_generated_path_runtime', False)
+        self.declare_parameter('runtime_path_must_contain', 'senior')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'x500_gimbal_0/base_link')
         self.declare_parameter('command_pose_topic', '/command/pose')
@@ -178,23 +179,18 @@ class UavExplorationNode(Node):
         self.declare_parameter('min_marker_id', 0)
         self.declare_parameter('max_marker_id', 49)
         self.declare_parameter('dynamic_safe_prefix', True)
-        self.declare_parameter('force_takeoff_before_path', True)
-        self.declare_parameter('takeoff_mode', 'relative')
-        self.declare_parameter('takeoff_relative_height', 8.0)
-        self.declare_parameter('takeoff_absolute_altitude', 18.0)
-        self.declare_parameter('takeoff_hold_sec', 3.0)
-        self.declare_parameter('takeoff_tolerance', 0.6)
-        self.declare_parameter('takeoff_xy_tolerance', 0.75)
-        self.declare_parameter('takeoff_gimbal_pitch_deg', -60.0)
         self.declare_parameter('block_pose_if_not_latched', True)
-        self.declare_parameter('block_pose_if_xy_not_origin', True)
         self.declare_parameter('forbidden_spawn_guard_enabled', True)
         self.declare_parameter('forbidden_spawn_x', -55.0)
         self.declare_parameter('forbidden_spawn_y', 80.0)
         self.declare_parameter('forbidden_spawn_radius', 5.0)
-        self.declare_parameter('safe_takeoff_relative_height', 5.0)
+        self.declare_parameter('forbidden_return_zone_enabled', True)
+        self.declare_parameter('forbidden_return_zone_name', 'mission1_tree_zone')
+        self.declare_parameter('forbidden_return_zone_min_x', -140.0)
+        self.declare_parameter('forbidden_return_zone_max_x', -115.0)
+        self.declare_parameter('forbidden_return_zone_min_y', 35.0)
+        self.declare_parameter('forbidden_return_zone_max_y', 68.0)
         self.declare_parameter('safe_altitude', 22.0)
-        self.declare_parameter('safe_altitude_after_takeoff', 18.0)
         self.declare_parameter('transition_altitude', 24.0)
         self.declare_parameter('max_transition_step', 12.0)
         self.declare_parameter('safe_prefix_hold_sec', 2.0)
@@ -202,6 +198,10 @@ class UavExplorationNode(Node):
 
     def read_params(self):
         self.path_csv = self.get_parameter('path_csv').value
+        self.allow_generated_path_runtime = self.get_parameter(
+            'allow_generated_path_runtime').value
+        self.runtime_path_must_contain = str(
+            self.get_parameter('runtime_path_must_contain').value).strip()
         self.map_frame = self.get_parameter('map_frame').value
         self.base_frame = self.get_parameter('base_frame').value
         self.command_pose_topic = self.get_parameter('command_pose_topic').value
@@ -259,34 +259,54 @@ class UavExplorationNode(Node):
         self.min_marker_id = int(self.get_parameter('min_marker_id').value)
         self.max_marker_id = int(self.get_parameter('max_marker_id').value)
         self.dynamic_safe_prefix = self.get_parameter('dynamic_safe_prefix').value
-        self.force_takeoff_before_path = self.get_parameter('force_takeoff_before_path').value
-        self.takeoff_mode = str(self.get_parameter('takeoff_mode').value).lower()
-        self.takeoff_relative_height = float(self.get_parameter('takeoff_relative_height').value)
-        self.takeoff_absolute_altitude = float(
-            self.get_parameter('takeoff_absolute_altitude').value)
-        self.takeoff_hold_sec = float(self.get_parameter('takeoff_hold_sec').value)
-        self.takeoff_tolerance = float(self.get_parameter('takeoff_tolerance').value)
-        self.takeoff_xy_tolerance = float(self.get_parameter('takeoff_xy_tolerance').value)
-        self.takeoff_gimbal_pitch_deg = float(
-            self.get_parameter('takeoff_gimbal_pitch_deg').value)
         self.block_pose_if_not_latched = self.get_parameter('block_pose_if_not_latched').value
-        self.block_pose_if_xy_not_origin = self.get_parameter(
-            'block_pose_if_xy_not_origin').value
         self.forbidden_spawn_guard_enabled = self.get_parameter(
             'forbidden_spawn_guard_enabled').value
         self.forbidden_spawn_x = float(self.get_parameter('forbidden_spawn_x').value)
         self.forbidden_spawn_y = float(self.get_parameter('forbidden_spawn_y').value)
         self.forbidden_spawn_radius = float(self.get_parameter('forbidden_spawn_radius').value)
-        self.safe_takeoff_relative_height = float(
-            self.get_parameter('safe_takeoff_relative_height').value)
+        self.forbidden_return_zone_enabled = self.get_parameter(
+            'forbidden_return_zone_enabled').value
+        self.forbidden_return_zone_name = str(
+            self.get_parameter('forbidden_return_zone_name').value)
+        self.forbidden_return_zone_min_x = float(
+            self.get_parameter('forbidden_return_zone_min_x').value)
+        self.forbidden_return_zone_max_x = float(
+            self.get_parameter('forbidden_return_zone_max_x').value)
+        self.forbidden_return_zone_min_y = float(
+            self.get_parameter('forbidden_return_zone_min_y').value)
+        self.forbidden_return_zone_max_y = float(
+            self.get_parameter('forbidden_return_zone_max_y').value)
         self.safe_altitude = float(self.get_parameter('safe_altitude').value)
-        self.safe_altitude_after_takeoff = float(
-            self.get_parameter('safe_altitude_after_takeoff').value)
         self.transition_altitude = float(self.get_parameter('transition_altitude').value)
         self.max_transition_step = float(self.get_parameter('max_transition_step').value)
         self.safe_prefix_hold_sec = float(self.get_parameter('safe_prefix_hold_sec').value)
         self.safe_prefix_gimbal_pitch_deg = float(
             self.get_parameter('safe_prefix_gimbal_pitch_deg').value)
+
+    def validate_runtime_path(self, path_csv: str) -> bool:
+        basename = os.path.basename(path_csv or '')
+        basename_lower = basename.lower()
+        required = self.runtime_path_must_contain.lower()
+
+        if basename_lower and 'generated' in basename_lower and not self.allow_generated_path_runtime:
+            self.publish_event(f'ERROR:RUNTIME_PATH_REJECTED_GENERATED:{basename}')
+            self.get_logger().error(
+                'Refusing generated UAV path for Mission2 runtime: '
+                f'{path_csv}. Set allow_generated_path_runtime=true only for debug launches.')
+            return False
+
+        if required and required not in basename_lower:
+            self.publish_event(
+                f'ERROR:RUNTIME_PATH_REJECTED_MISSING_TOKEN:{basename}:required={required}')
+            self.get_logger().error(
+                'Refusing UAV runtime path because filename does not contain '
+                f'"{required}": {path_csv}')
+            return False
+
+        if basename_lower:
+            self.publish_event(f'RUNTIME_PATH_ACCEPTED:{basename}')
+        return True
 
     def load_path(self, path_csv: str) -> List[Waypoint]:
         if not path_csv:
@@ -362,7 +382,6 @@ class UavExplorationNode(Node):
         tag_lower = tag.lower()
         is_prefix = (
             tag_lower == 'takeoff_climb'
-            or tag_lower == 'forced_takeoff_climb'
             or tag_lower == 'safe_altitude'
             or tag_lower.startswith('transition_')
             or 'spawn' in tag_lower
@@ -392,6 +411,12 @@ class UavExplorationNode(Node):
         return (
             math.hypot(x - self.forbidden_spawn_x, y - self.forbidden_spawn_y)
             <= self.forbidden_spawn_radius
+        )
+
+    def is_in_forbidden_return_zone(self, x: float, y: float) -> bool:
+        return (
+            self.forbidden_return_zone_min_x <= x <= self.forbidden_return_zone_max_x
+            and self.forbidden_return_zone_min_y <= y <= self.forbidden_return_zone_max_y
         )
 
     def mission_state_cb(self, msg: String):
@@ -581,7 +606,6 @@ class UavExplorationNode(Node):
         self.current_index = 0
         self.hold_start = None
         self.reset_waypoint_progress_tracking()
-        self.takeoff_hold_start = None
         self.path_following_started = False
         self.first_pose_published = False
         self.last_pose_publish_tag = None
@@ -591,65 +615,30 @@ class UavExplorationNode(Node):
         self.get_logger().info(f'Exploration start reason: {reason}')
         self.publish_event('EXPLORATION_STARTED')
 
-        if self.force_takeoff_before_path:
-            self.waypoints = []
-            self.takeoff_target = self.create_forced_takeoff_target(start_x, start_y, start_z)
-            self.state = ExplorationState.TAKEOFF_CLIMB
-            self.get_logger().info('Forced takeoff before CSV/path following is enabled.')
-            self.get_logger().info(
-                f'Takeoff target: x={self.takeoff_target.x}, y={self.takeoff_target.y}, '
-                f'z={self.takeoff_target.z}, mode={self.takeoff_mode}, '
-                f'hold_sec={self.takeoff_target.hold_sec}')
-            self.get_logger().info('CSV scan waypoints start only after forced takeoff hold completes.')
-            self.publish_event('TAKEOFF_CLIMB_STARTED')
-            return
-
         if start_tf is not None:
-            path_started = self.start_path_following_from_tf(start_tf, include_takeoff_prefix=True)
+            path_started = self.start_path_following_from_tf(start_tf)
         else:
-            path_started = self.start_path_following_from_origin(
-                start_x, start_y, start_z, include_takeoff_prefix=True)
+            path_started = self.start_path_following_from_origin(start_x, start_y, start_z)
         if not path_started:
             return
         self.get_logger().info(f'Exploration start reason: {reason}')
 
-    def create_forced_takeoff_target(self, start_x: float, start_y: float, start_z: float) -> Waypoint:
-        first_scan = self.scan_waypoints[0]
-        heading_to_scan = self.yaw_to_target_deg(start_x, start_y, first_scan.x, first_scan.y)
-        return Waypoint(
-            x=start_x,
-            y=start_y,
-            z=self.calculate_takeoff_target_z(start_z),
-            yaw_deg=heading_to_scan,
-            gimbal_pitch_deg=self.clamp(self.takeoff_gimbal_pitch_deg, -90.0, 20.0),
-            hold_sec=max(0.0, self.takeoff_hold_sec),
-            tag='forced_takeoff_climb',
-        )
-
-    def calculate_takeoff_target_z(self, start_z: float) -> float:
-        if self.takeoff_mode == 'absolute':
-            return max(self.takeoff_absolute_altitude, start_z + 1.0)
-        return start_z + self.takeoff_relative_height
-
-    def start_path_following_from_tf(self, current_tf, include_takeoff_prefix: bool) -> bool:
+    def start_path_following_from_tf(self, current_tf) -> bool:
         start_x = current_tf.transform.translation.x
         start_y = current_tf.transform.translation.y
         start_z = current_tf.transform.translation.z
-        return self.start_path_following_from_origin(
-            start_x, start_y, start_z, include_takeoff_prefix=include_takeoff_prefix)
+        return self.start_path_following_from_origin(start_x, start_y, start_z)
 
     def start_path_following_from_origin(
         self,
         start_x: float,
         start_y: float,
         start_z: float,
-        include_takeoff_prefix: bool,
     ) -> bool:
         if self.dynamic_safe_prefix:
-            self.waypoints = self.create_dynamic_safe_path(
-                start_x, start_y, start_z, include_takeoff_prefix=include_takeoff_prefix)
-            self.get_logger().info('Dynamic safe prefix created from current TF pose.')
-            self.publish_event('DYNAMIC_SAFE_PREFIX_CREATED')
+            self.waypoints = self.create_dynamic_transition_path(start_x, start_y, start_z)
+            self.get_logger().info('Dynamic transition path created from current TF pose.')
+            self.publish_event('DYNAMIC_TRANSITION_PATH_CREATED')
         else:
             self.waypoints = list(self.scan_waypoints)
 
@@ -668,38 +657,16 @@ class UavExplorationNode(Node):
         self.publish_next_waypoint_event()
         return True
 
-    def create_dynamic_safe_path(
+    def create_dynamic_transition_path(
         self,
         start_x: float,
         start_y: float,
         start_z: float,
-        include_takeoff_prefix: bool = True,
     ) -> List[Waypoint]:
         first_scan = self.scan_waypoints[0]
-        heading_to_scan = self.yaw_to_target_deg(start_x, start_y, first_scan.x, first_scan.y)
         safe_pitch = self.clamp(self.safe_prefix_gimbal_pitch_deg, -90.0, 20.0)
         safe_hold = max(0.0, self.safe_prefix_hold_sec)
         waypoints: List[Waypoint] = []
-
-        if include_takeoff_prefix:
-            waypoints.append(Waypoint(
-                x=start_x,
-                y=start_y,
-                z=max(5.0, start_z + self.safe_takeoff_relative_height),
-                yaw_deg=heading_to_scan,
-                gimbal_pitch_deg=safe_pitch,
-                hold_sec=safe_hold,
-                tag='takeoff_climb',
-            ))
-            waypoints.append(Waypoint(
-                x=start_x,
-                y=start_y,
-                z=max(5.0, self.safe_altitude_after_takeoff),
-                yaw_deg=heading_to_scan,
-                gimbal_pitch_deg=safe_pitch,
-                hold_sec=safe_hold,
-                tag='safe_altitude',
-            ))
 
         distance = math.hypot(first_scan.x - start_x, first_scan.y - start_y)
         if self.max_transition_step > 0.0 and distance > self.max_transition_step:
@@ -871,19 +838,6 @@ class UavExplorationNode(Node):
                 self.publish_state()
                 return
 
-        if self.state in (ExplorationState.TAKEOFF_CLIMB, ExplorationState.TAKEOFF_HOLD):
-            self.handle_forced_takeoff()
-            return
-
-        if self.state == ExplorationState.TAKEOFF_COMPLETE:
-            current_tf = self.lookup_current_tf()
-            if current_tf is None:
-                self.publish_state()
-                return
-            self.start_path_following_from_tf(current_tf, include_takeoff_prefix=False)
-            self.publish_state()
-            return
-
         if self.state == ExplorationState.WAITING_FOR_TF and not self.path_following_started:
             self.publish_state()
             return
@@ -905,7 +859,9 @@ class UavExplorationNode(Node):
             self.state = ExplorationState.EXPLORING
 
         waypoint = self.waypoints[self.current_index]
-        self.publish_waypoint(waypoint)
+        if not self.publish_waypoint(waypoint):
+            self.publish_state()
+            return
 
         distance = self.distance_to_waypoint(current_tf, waypoint)
         self.update_waypoint_progress(distance)
@@ -955,44 +911,6 @@ class UavExplorationNode(Node):
 
         self.publish_state()
 
-    def handle_forced_takeoff(self):
-        if self.takeoff_target is None:
-            self.state = ExplorationState.ERROR
-            self.publish_event('ERROR:NO_TAKEOFF_TARGET')
-            self.publish_state()
-            return
-
-        self.publish_waypoint(self.takeoff_target)
-        current_tf = self.lookup_current_tf()
-        if current_tf is None:
-            self.publish_state()
-            return
-
-        current_z = current_tf.transform.translation.z
-        target_z = self.takeoff_target.z
-        if (
-            self.state == ExplorationState.TAKEOFF_CLIMB
-            and current_z >= target_z - self.takeoff_tolerance
-        ):
-            self.state = ExplorationState.TAKEOFF_HOLD
-            self.takeoff_hold_start = self.get_clock().now()
-            self.publish_event('TAKEOFF_ALTITUDE_REACHED')
-
-        if self.state == ExplorationState.TAKEOFF_HOLD:
-            if self.takeoff_hold_start is None:
-                self.takeoff_hold_start = self.get_clock().now()
-            hold_elapsed = (self.get_clock().now() - self.takeoff_hold_start).nanoseconds / 1e9
-            if hold_elapsed >= max(0.0, self.takeoff_hold_sec):
-                self.state = ExplorationState.TAKEOFF_COMPLETE
-                self.publish_event('TAKEOFF_HOLD_COMPLETE')
-                latest_tf = self.lookup_current_tf()
-                if latest_tf is None:
-                    self.publish_state()
-                    return
-                self.start_path_following_from_tf(latest_tf, include_takeoff_prefix=False)
-
-        self.publish_state()
-
     def lookup_current_tf(self):
         return self.lookup_tf(self.map_frame, self.base_frame)
 
@@ -1014,10 +932,8 @@ class UavExplorationNode(Node):
     def publish_current_target_pose(self):
         if self.current_index < len(self.waypoints):
             self.publish_waypoint(self.waypoints[self.current_index])
-        elif self.takeoff_target is not None:
-            self.publish_waypoint(self.takeoff_target)
 
-    def publish_waypoint(self, waypoint: Waypoint):
+    def publish_waypoint(self, waypoint: Waypoint) -> bool:
         pose = PoseStamped()
         pose.header.stamp = self.get_clock().now().to_msg()
         pose.header.frame_id = self.map_frame
@@ -1028,12 +944,13 @@ class UavExplorationNode(Node):
         pose.pose.orientation.z = math.sin(yaw / 2.0)
         pose.pose.orientation.w = math.cos(yaw / 2.0)
         if not self.publish_command_pose_guarded(pose, waypoint.tag):
-            return
+            return False
         self.current_pose = pose
 
         gimbal_msg = Float32()
         gimbal_msg.data = float(waypoint.gimbal_pitch_deg)
         self.gimbal_pub.publish(gimbal_msg)
+        return True
 
     def publish_command_pose_guarded(self, pose: PoseStamped, tag: str) -> bool:
         pose_x = pose.pose.position.x
@@ -1058,46 +975,11 @@ class UavExplorationNode(Node):
             return False
 
         if not self.first_pose_published:
-            if tag != 'forced_takeoff_climb':
-                self.block_command_pose(
-                    'POSE_BLOCKED_FIRST_TAKEOFF_NOT_ORIGIN',
-                    tag,
-                    'First command pose must be forced_takeoff_climb at Mission2 origin.')
-                return False
-            if (
-                abs(pose_x - self.mission2_origin_x) > self.takeoff_xy_tolerance
-                or abs(pose_y - self.mission2_origin_y) > self.takeoff_xy_tolerance
-            ):
-                self.block_command_pose(
-                    'POSE_BLOCKED_FIRST_TAKEOFF_NOT_ORIGIN',
-                    tag,
-                    'First takeoff pose x/y differs from Mission2 origin. '
-                    f'pose=({pose_x}, {pose_y}), '
-                    f'origin=({self.mission2_origin_x}, {self.mission2_origin_y})')
-                return False
-            xy_error_x = pose_x - self.mission2_origin_x
-            xy_error_y = pose_y - self.mission2_origin_y
             self.publish_event(
-                'FIRST_TAKEOFF_POSE_CONFIRMED '
+                'FIRST_PATH_POSE_CONFIRMED '
                 f'mission2_origin=({self.mission2_origin_x},{self.mission2_origin_y},{self.mission2_origin_z}) '
-                f'first_takeoff_pose=({pose.pose.position.x},{pose.pose.position.y},{pose.pose.position.z}) '
-                f'xy_error=({xy_error_x},{xy_error_y})')
-
-        if (
-            self.block_pose_if_xy_not_origin
-            and self.state in (ExplorationState.TAKEOFF_CLIMB, ExplorationState.TAKEOFF_HOLD)
-            and (
-                abs(pose_x - self.mission2_origin_x) > self.takeoff_xy_tolerance
-                or abs(pose_y - self.mission2_origin_y) > self.takeoff_xy_tolerance
-            )
-        ):
-            self.block_command_pose(
-                'POSE_BLOCKED_XY_NOT_ORIGIN',
-                tag,
-                'Command pose blocked because takeoff x/y differs from Mission2 origin. '
-                f'pose=({pose_x}, {pose_y}), '
-                f'origin=({self.mission2_origin_x}, {self.mission2_origin_y})')
-            return False
+                f'first_path_pose=({pose.pose.position.x},{pose.pose.position.y},{pose.pose.position.z}) '
+                f'tag={tag}')
 
         if (
             self.forbidden_spawn_guard_enabled
@@ -1115,6 +997,20 @@ class UavExplorationNode(Node):
                 f'forbidden=({self.forbidden_spawn_x}, {self.forbidden_spawn_y})')
             return False
 
+        if self.should_block_forbidden_return_zone(pose_x, pose_y):
+            self.block_command_pose(
+                'POSE_BLOCKED_FORBIDDEN_RETURN_ZONE',
+                tag,
+                'Command pose blocked inside forbidden Mission1 return zone after '
+                'UAV path following started. '
+                f'pose=({pose_x}, {pose_y}), '
+                f'zone={self.forbidden_return_zone_name}:'
+                f'x=[{self.forbidden_return_zone_min_x},{self.forbidden_return_zone_max_x}], '
+                f'y=[{self.forbidden_return_zone_min_y},{self.forbidden_return_zone_max_y}]')
+            self.publish_event('ERROR:POSE_BLOCKED_FORBIDDEN_RETURN_ZONE')
+            self.skip_current_waypoint_after_forbidden_return(tag)
+            return False
+
         self.pose_pub.publish(pose)
         self.first_pose_published = True
         if self.last_pose_publish_tag != tag:
@@ -1125,6 +1021,21 @@ class UavExplorationNode(Node):
             f'x={pose.pose.position.x}, y={pose.pose.position.y}, z={pose.pose.position.z}',
             throttle_duration_sec=2.0)
         return True
+
+    def should_block_forbidden_return_zone(self, pose_x: float, pose_y: float) -> bool:
+        if not self.forbidden_return_zone_enabled:
+            return False
+        if not self.path_following_started:
+            return False
+        return self.is_in_forbidden_return_zone(pose_x, pose_y)
+
+    def skip_current_waypoint_after_forbidden_return(self, tag: str):
+        if self.current_index >= len(self.waypoints):
+            return
+        waypoint = self.waypoints[self.current_index]
+        if waypoint.tag != tag:
+            return
+        self.advance_to_next_waypoint('WAYPOINT_FORBIDDEN_RETURN_ZONE_SKIP', waypoint)
 
     def block_command_pose(self, event: str, tag: str, reason: str):
         self.publish_event(event)
@@ -1197,9 +1108,19 @@ class UavExplorationNode(Node):
             'ignore_yaw_for_waypoint_reached': self.ignore_yaw_for_waypoint_reached,
             'skip_close_waypoints': self.skip_close_waypoints,
             'min_waypoint_separation': self.min_waypoint_separation,
+            'runtime_path_valid': self.runtime_path_valid,
+            'allow_generated_path_runtime': self.allow_generated_path_runtime,
+            'runtime_path_must_contain': self.runtime_path_must_contain,
+            'forbidden_return_zone_enabled': self.forbidden_return_zone_enabled,
+            'forbidden_return_zone_name': self.forbidden_return_zone_name,
+            'forbidden_return_zone': {
+                'min_x': self.forbidden_return_zone_min_x,
+                'max_x': self.forbidden_return_zone_max_x,
+                'min_y': self.forbidden_return_zone_min_y,
+                'max_y': self.forbidden_return_zone_max_y,
+            },
             'max_same_waypoint_hold_sec': self.max_same_waypoint_hold_sec,
             'max_total_hover_at_marker_sec': self.max_total_hover_at_marker_sec,
-            'takeoff_target_z': self.takeoff_target.z if self.takeoff_target else None,
             'path_following_started': self.path_following_started,
             'mission2_origin_latched': self.mission2_origin_latched,
             'mission2_origin_published': self.mission2_origin_published,

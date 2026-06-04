@@ -57,8 +57,12 @@ run_section "static spawn coordinate references" \
     "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/tools"
 
 run_section "static safe path and prefix references" \
-  grep -Rni "uav_path_mission2_senior\\|uav_path_generated\\|uav_path_safe\\|takeoff_climb\\|safe_altitude\\|transition_" \
+  grep -Rni "uav_path_mission2_senior\\|uav_path_generated\\|uav_path_safe\\|takeoff_climb\\|safe_altitude\\|transition_\\|allow_generated_path_runtime\\|runtime_path_must_contain" \
     "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/tools"
+
+run_section "static forbidden return zone references" \
+  grep -Rni "forbidden_return_zone\\|POSE_BLOCKED_FORBIDDEN_RETURN_ZONE\\|WAYPOINT_FORBIDDEN_RETURN_ZONE_SKIP" \
+    "${WORKSPACE}/src/asp_uav_control" "${WORKSPACE}/tools" "${WORKSPACE}/docs"
 
 run_section "static Mission2/Mission3 parallel start references" \
   grep -Rni "start_rendezvous_on_mission2_start\\|PARALLEL_MISSION2_3_STARTED\\|UGV_RENDEZVOUS_START_PUBLISHED" \

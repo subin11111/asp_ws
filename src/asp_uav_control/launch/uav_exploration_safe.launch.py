@@ -21,7 +21,6 @@ def generate_launch_description():
                 {'dynamic_safe_prefix': True},
                 {'use_mission2_latched_origin': True},
                 {'require_mission2_latched_origin': True},
-                {'force_takeoff_before_path': True},
                 {'start_on_launch': False},
             ],
         )

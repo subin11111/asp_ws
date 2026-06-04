@@ -16,7 +16,7 @@ def generate_launch_description():
     uav_path = os.path.join(uav_pkg, 'path', 'uav_path_mission2_senior.csv')
     perception_params = os.path.join(perception_pkg, 'config', 'uav_aruco_detector_params.yaml')
     rendezvous_params = os.path.join(ugv_pkg, 'config', 'rendezvous_params.yaml')
-    rendezvous_path = os.path.join(ugv_pkg, 'path', 'rendezvous.csv')
+    rendezvous_path = os.path.join(ugv_pkg, 'path', 'mission3_rendezvous_senior.csv')
     landing_params = os.path.join(landing_pkg, 'config', 'precision_landing_params.yaml')
 
     return LaunchDescription([
@@ -42,8 +42,7 @@ def generate_launch_description():
             parameters=[
                 uav_params,
                 {'path_csv': uav_path},
-                {'dynamic_safe_prefix': True},
-                {'force_takeoff_before_path': True},
+                {'dynamic_safe_prefix': False},
                 {'use_mission2_latched_origin': True},
                 {'require_mission2_latched_origin': True},
                 {'start_on_launch': False},

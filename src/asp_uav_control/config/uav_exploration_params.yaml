@@ -1,9 +1,11 @@
 uav_exploration_node:
   ros__parameters:
     path_csv: ""
+    allow_generated_path_runtime: false
+    runtime_path_must_contain: "senior"
     use_safe_path: false
     safe_path_csv: ""
-    dynamic_safe_prefix: true
+    dynamic_safe_prefix: false
     continue_on_marker_timeout: true
     marker_wait_timeout_sec: 3.0
     hold_even_if_marker_detected: true
@@ -14,23 +16,18 @@ uav_exploration_node:
     min_waypoint_separation: 4.0
     max_same_waypoint_hold_sec: 12.0
     max_total_hover_at_marker_sec: 8.0
-    force_takeoff_before_path: true
-    takeoff_mode: "relative"
-    takeoff_relative_height: 8.0
-    takeoff_absolute_altitude: 18.0
-    takeoff_hold_sec: 3.0
-    takeoff_tolerance: 0.6
-    takeoff_xy_tolerance: 0.75
-    takeoff_gimbal_pitch_deg: -60.0
     block_pose_if_not_latched: true
-    block_pose_if_xy_not_origin: true
     forbidden_spawn_guard_enabled: true
     forbidden_spawn_x: -55.0
     forbidden_spawn_y: 80.0
     forbidden_spawn_radius: 5.0
-    safe_takeoff_relative_height: 5.0
+    forbidden_return_zone_enabled: true
+    forbidden_return_zone_name: "mission1_tree_zone"
+    forbidden_return_zone_min_x: -140.0
+    forbidden_return_zone_max_x: -115.0
+    forbidden_return_zone_min_y: 35.0
+    forbidden_return_zone_max_y: 68.0
     safe_altitude: 22.0
-    safe_altitude_after_takeoff: 18.0
     transition_altitude: 24.0
     max_transition_step: 12.0
     safe_prefix_hold_sec: 2.0

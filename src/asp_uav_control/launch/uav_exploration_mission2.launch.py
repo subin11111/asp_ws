@@ -18,8 +18,7 @@ def generate_launch_description():
             parameters=[
                 params,
                 {'path_csv': path_csv},
-                {'dynamic_safe_prefix': True},
-                {'force_takeoff_before_path': True},
+                {'dynamic_safe_prefix': False},
                 {'use_mission2_latched_origin': True},
                 {'require_mission2_latched_origin': True},
                 {'start_on_launch': False},

@@ -358,6 +358,7 @@ private:
     publish_zero_twist_burst(zero_publish_after_stop_count_);
     publish_state("STOPPED");
     publish_event(event);
+    publish_event("MISSION1_CMD_RELEASED");
     if (disable_cmd_after_stop_) {
       RCLCPP_INFO(
         get_logger(),

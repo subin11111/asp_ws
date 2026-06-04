@@ -19,6 +19,7 @@ ugv_rendezvous_node:
     slow_down_distance: 2.0
     heading_slowdown_cos_threshold: 0.2
     allow_reverse: false
+    start_delay_sec: 1.5
     stuck_timeout_sec: 20.0
     progress_epsilon_m: 0.4
     zero_publish_after_complete_count: 5

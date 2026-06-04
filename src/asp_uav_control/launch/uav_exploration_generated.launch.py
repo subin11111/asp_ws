@@ -18,6 +18,8 @@ def generate_launch_description():
             parameters=[
                 params,
                 {'path_csv': path_csv},
+                {'allow_generated_path_runtime': True},
+                {'runtime_path_must_contain': ''},
             ],
         )
     ])

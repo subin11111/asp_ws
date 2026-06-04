@@ -31,3 +31,7 @@ mission_logs/
 
 # Diagnostic logs
 tools/diagnostics/logs/
+tools/asp_final_diagnostics/logs/
+
+# Runtime graph exports
+rosgraph.png

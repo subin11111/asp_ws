@@ -34,21 +34,23 @@ x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag
 -97.408805847168,67.4708023071289,13.85313296318054,0.0,-90.0,3.0,project_wp_1_action_1
 ```
 
-현재 `path/uav_path.csv`는 원본 CSV
-`/home/subin/Autonomous-System-Platform-final-project/uav_controller/path/uav_path.csv`를
-이 패키지의 `x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag` 형식으로 변환한 것이다.
+현재 `path/uav_path.csv`는 이 패키지의 `x,y,z,yaw_deg,gimbal_pitch_deg,hold_sec,tag`
+형식으로 정리한 waypoint CSV이다.
 
-Mission2 실사용 runtime path는 `path/uav_path_mission2_senior.csv`이다. 이 파일은 선배 팀
-waypoint를 Mission2용으로 고정한 경로이며, marker pose 기반 generated path처럼
-`wall_E/W/N/S` 후보를 촘촘하게 돌지 않는다. `uav_path_generated.csv`와
-`uav_path_mission2.csv`는 marker 배치 확인과 path 설계 참고용으로만 둔다.
+Mission2 실사용 runtime path는 `path/uav_path_mission2_senior.csv`이다. 이 파일은
+Mission2용으로 고정한 runtime 경로이며, marker pose 기반 generated path처럼 `wall_E/W/N/S`
+후보를 촘촘하게 돌지 않는다. `uav_path_generated.csv`와 `uav_path_mission2.csv`는 marker
+배치 확인과 path 설계 보조용으로만 둔다.
+기본 runtime guard는 `allow_generated_path_runtime: false`,
+`runtime_path_must_contain: "senior"`로 설정되어 generated/reference path가 full mission에
+들어오지 않게 한다.
 
 변환 규칙:
 
-* 원본 `x,y,z`는 map frame waypoint로 유지했다.
-* 원본 yaw 값은 degree로 변환해 `yaw_deg`에 넣었다.
-* 원본 gimbal pitch 값은 `gimbal_pitch_deg`로 유지했다.
-* 원본 action 값은 tag 이름에 반영했다.
+* 입력 `x,y,z`는 map frame waypoint로 유지했다.
+* 입력 yaw 값은 degree로 변환해 `yaw_deg`에 넣었다.
+* 입력 gimbal pitch 값은 `gimbal_pitch_deg`로 유지했다.
+* 입력 action 값은 tag 이름에 반영했다.
 * 모든 waypoint의 `hold_sec`는 초기 검증값 3.0초로 설정했다.
 * yaw 또는 gimbal pitch가 없는 waypoint는 안전한 기본 관찰값으로 채웠다.
 
@@ -64,16 +66,14 @@ roof/wall 관측 waypoint 후보를 자동 생성한다.
 현재 전체 미션은 UAV가 UGV 위에 실려 Mission2 시작 지점까지 이동하는 구조이다. 따라서
 UAV exploration 시작 위치는 launch 시점이 아니라 Mission2 Trigger 시점이다.
 `uav_path.csv`는 전체 비행 경로가 아니라 marker scan waypoint 후보 목록으로 취급한다.
-`dynamic_safe_prefix: true`이면 `uav_exploration_node`가 start signal 이후
-`map -> x500_gimbal_0/base_link` TF를 읽고, runtime에서 안전한 transition waypoint를 구성한다.
-기본값인 `force_takeoff_before_path: true`에서는 별도 `TAKEOFF_CLIMB`/`TAKEOFF_HOLD` 단계를
-먼저 수행한 뒤 transition과 CSV scan waypoint를 시작한다.
+전체 미션 runtime 기본값은 `dynamic_safe_prefix: false`이다. Mission2 start signal 이후
+`uav_exploration_node`는 latch된 Mission2 origin을 확인한 뒤, 별도 강제 이륙 waypoint를 만들지
+않고 senior CSV scan waypoint를 바로 시작한다.
 전체 미션에서는 `/ugv/mission_event`의 `MISSION2_START_REACHED` event를 받은 순간
-UAV TF를 `mission2_takeoff_origin`으로 latch하고, 이후 start signal에서 그 origin의 x/y를
-기준으로 먼저 상승한다.
-`/command/pose` publish는 guard를 통과해야 하며, Mission2 origin이 없거나 takeoff 중 x/y가
-origin과 다르면 차단된다. `offboard_control`도 `/uav/mission2_takeoff_origin`을 받기 전에는
-`/command/pose`를 PX4 setpoint로 변환하지 않는다.
+UAV TF를 `mission2_takeoff_origin`으로 latch한다.
+`/command/pose` publish는 guard를 통과해야 하며, Mission2 origin이 없으면 차단된다.
+`offboard_control`도 `/uav/mission2_takeoff_origin`을 받기 전에는 `/command/pose`를 PX4
+setpoint로 변환하지 않는다.
 
 중요 좌표계 수정:
 
@@ -88,8 +88,8 @@ delta_ned = ENU_TO_NED(delta_map_enu)
 final_px4_setpoint_ned = mission2_px4_anchor_ned + delta_ned
 ```
 
-첫 takeoff에서 `final_px4_setpoint_ned`의 x/y는 0이 아니라 Mission2 순간 PX4 local x/y와
-같아야 한다. z만 `mission2_px4_anchor_ned.z - takeoff_relative_height`가 되어야 한다.
+첫 path waypoint에서 `final_px4_setpoint_ned`는 Mission2 순간 PX4 local anchor에
+Mission2 map anchor 대비 waypoint 차이를 더한 값이어야 한다.
 
 현재 Mission1에서는 UGV와 UAV가 함께 이동하는 것이 확인되었다. Mission1 이후 Mission2를
 준비하는 UAV 이륙 동작도 현재 위치 기준 상승 단계까지 안정적으로 동작하는 것을 확인했다.
@@ -129,8 +129,8 @@ EXPLORATION_TIMEOUT
 
 Mission1 동안 UAV가 UGV와 함께 이동하므로, UAV exploration 시작 시점의 위치는 매번 달라질 수
 있다. 따라서 exploration start signal이 들어오면 CSV 첫 waypoint로 바로 이동하지 않고,
-먼저 Mission2 시작 event 시점에 저장한 `mission2_takeoff_origin`의 x/y를 고정한 상태로
-z 방향 상승만 수행한다.
+Mission2 시작 event 시점에 저장한 `mission2_takeoff_origin`은 좌표 변환 anchor로만 사용하고,
+별도 forced takeoff command는 publish하지 않는다.
 
 기본 동작 순서:
 
@@ -139,10 +139,7 @@ IDLE
   -> /ugv/mission_event: MISSION2_START_REACHED
   -> latch mission2_takeoff_origin from map -> x500_gimbal_0/base_link
   -> start signal
-  -> TAKEOFF_CLIMB
-  -> TAKEOFF_HOLD
-  -> TAKEOFF_COMPLETE
-  -> dynamic transition/path build
+  -> PATH_FOLLOWING_STARTED
   -> EXPLORING
 ```
 
@@ -153,24 +150,6 @@ Mission2 origin이 latch되기 전 start signal이 들어와도 `WAITING_FOR_MIS
 머물며 `/command/pose`와 CSV waypoint publish를 시작하지 않는다. 이것은 spawn 위치,
 launch 시점 위치, CSV 첫 waypoint 쪽으로 이동하지 않기 위한 의도된 안전 동작이다.
 
-forced takeoff target 계산:
-
-```text
-takeoff_mode == "relative":
-  target_z = mission2_origin_z + takeoff_relative_height
-
-takeoff_mode == "absolute":
-  target_z = max(takeoff_absolute_altitude, mission2_origin_z + 1.0)
-```
-
-`TAKEOFF_CLIMB`에서는 `forced_takeoff_climb` pose만 publish하며 CSV index를 증가시키지 않는다.
-첫 `/command/pose`는 반드시 `x=mission2_origin_x`, `y=mission2_origin_y`이고 z만 상승 목표로
-설정된다.
-현재 z가 `target_z - takeoff_tolerance` 이상이 되면 `TAKEOFF_ALTITUDE_REACHED` event를 내고
-`TAKEOFF_HOLD`로 들어간다. `takeoff_hold_sec` 동안 같은 pose를 유지한 뒤
-`TAKEOFF_HOLD_COMPLETE` event를 내고, 그때의 TF 위치를 기준으로 transition waypoint와 scan
-waypoint를 구성한다. CSV/dynamic path는 `PATH_FOLLOWING_STARTED` 이후에만 시작된다.
-
 관련 파라미터:
 
 ```yaml
@@ -180,22 +159,15 @@ use_mission2_latched_origin: true
 require_mission2_latched_origin: true
 mission2_origin_map_frame: "map"
 mission2_origin_uav_frame: "x500_gimbal_0/base_link"
-force_takeoff_before_path: true
-takeoff_mode: "relative"
-takeoff_relative_height: 8.0
-takeoff_absolute_altitude: 18.0
-takeoff_hold_sec: 3.0
-takeoff_tolerance: 0.6
-takeoff_gimbal_pitch_deg: -60.0
-safe_altitude_after_takeoff: 18.0
+dynamic_safe_prefix: false
 transition_altitude: 18.0
 max_transition_step: 15.0
 ```
 
 `/uav/mission2_takeoff_origin`은 latch된 origin을 `geometry_msgs/msg/PoseStamped`로 publish한다.
 CSV 안의 `takeoff_climb`, `safe_altitude`, `transition_*` row는 전체 미션에서는 정적 spawn
-위치 기준일 수 있으므로 scan waypoint 후보에서 제거하고, Mission2 origin 기준 prefix를
-runtime에서 다시 구성한다.
+위치 기준일 수 있으므로 scan waypoint 후보에서 제거한다. 전체 미션 runtime은 Mission2 origin
+기준 forced prefix를 다시 만들지 않는다.
 
 ## Mission2 takeoff origin hard rule
 
@@ -396,6 +368,8 @@ ros2 launch asp_uav_control uav_exploration_generated.launch.py
 
 `uav_path_generated.csv`는 최종 경로가 아니라 후보 경로이다. launch 로그에서
 `UAV exploration path_csv`와 `First waypoint`를 확인해 실제 어떤 CSV가 로드됐는지 먼저 확인한다.
+generated 전용 launch는 `allow_generated_path_runtime: true`와
+`runtime_path_must_contain: ""`를 명시해 debug 실행임을 구분한다.
 generated 전용 launch도 launch 직후 자동 시작되지 않으며, `/uav/exploration_start true` 또는
 FSM state `UAV_EXPLORATION_READY`가 있어야 waypoint publish를 시작한다.
 
@@ -423,8 +397,8 @@ ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
 launch 직후 `/uav/exploration_state`가 `IDLE`이고 `/command/pose` 출력이 없다면 자동 시작 방지 조건이 맞다.
 `MISSION2_START_REACHED` 이후 `/uav/exploration_event`에
 `MISSION2_TAKEOFF_ORIGIN_LATCHED`가 출력되고, `/uav/mission2_takeoff_origin`이 Mission2 지점의
-UAV 위치를 publish해야 한다. start 후 첫 `/command/pose`의 x/y는
-`mission2_takeoff_origin`의 x/y와 같고 z만 `takeoff_relative_height`만큼 증가해야 한다.
+UAV 위치를 publish해야 한다. start 후 첫 `/command/pose`는 runtime path의 첫 scan waypoint이며,
+offboard 변환은 Mission2 map/PX4 local anchor 기준으로 계산되어야 한다.
 
 Mission2 origin이 latch되기 전에 수동 start를 보내면 `WAITING_FOR_MISSION2_ORIGIN` 상태가
 되어야 하고 `/command/pose`가 publish되면 안 된다.
@@ -485,20 +459,16 @@ ros2 topic echo /fmu/in/trajectory_setpoint
 3. `/uav/mission2_takeoff_origin`에 Mission2 지점 UAV 위치 publish
 4. `/mission/state`가 `UAV_TAKEOFF_READY` 또는 `UAV_EXPLORATION_READY`
 5. 또는 수동 `/uav/exploration_start true`
-6. 첫 `/command/pose`: `x=mission2_takeoff_origin.x`, `y=mission2_takeoff_origin.y`,
-   `z=mission2_takeoff_origin.z + takeoff_relative_height`
-7. UAV가 그 자리에서 상승
-8. `TAKEOFF_HOLD_COMPLETE` 이후 `PATH_FOLLOWING_STARTED`
-9. 그 다음 scan waypoint 이동
+6. `/uav/exploration_event`: `PATH_FOLLOWING_STARTED`
+7. 첫 `/command/pose`: senior CSV 첫 scan waypoint
+8. 이후 scan waypoint 이동
 
 offboard 변환 정상 기준:
 
 ```text
 origin_source=mission2_map_and_px4_local_anchor
-delta_map_enu x,y ~= 0
-delta_map_enu z ~= takeoff_relative_height
-final_setpoint_ned x,y == mission2_px4_anchor_ned x,y
-final_setpoint_ned z == mission2_px4_anchor_ned z - takeoff_relative_height
+delta_map_enu ~= first senior waypoint - mission2 origin
+final_setpoint_ned == mission2_px4_anchor_ned + ENU_TO_NED(delta_map_enu)
 ```
 
 문제가 발생하면 즉시 아래 진단 스크립트를 실행한다.

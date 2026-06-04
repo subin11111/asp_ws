@@ -1,0 +1,18 @@
+asp_final_uav_aruco_detector:
+  ros__parameters:
+    mode: uav
+    image_topic: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+    camera_info_topic: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info
+    map_frame: map
+    camera_frame: x500_gimbal_0/camera_link
+    dictionary: DICT_4X4_50
+    marker_size_m: 1.0
+asp_final_landing_aruco_detector:
+  ros__parameters:
+    mode: landing
+    image_topic: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image
+    camera_info_topic: /world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/camera_info
+    map_frame: map
+    camera_frame: x500_gimbal_0/camera_link
+    dictionary: DICT_4X4_50
+    marker_size_m: 0.5

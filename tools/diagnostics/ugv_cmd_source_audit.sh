@@ -40,11 +40,15 @@ run_section "static UGV cmd topic references" \
   grep -Rni "/command/ugv_cmd_vel" "${WORKSPACE}/src" "${WORKSPACE}/tools"
 
 run_section "static UGV stop/release references" \
-  grep -Rni "publish_zero_twist\\|stopped_\\|zero_publish_after_stop\\|disable_cmd_after_stop" \
+  grep -Rni "publish_zero_twist\\|stopped_\\|zero_publish_after_stop\\|disable_cmd_after_stop\\|MISSION1_CMD_RELEASED" \
     "${WORKSPACE}/src/asp_ugv_control"
 
 run_section "static UGV rendezvous speed references" \
   grep -Rni "cruise_speed\\|lookahead_distance\\|max_linear_speed\\|RENDEZVOUS_LOOKAHEAD_SKIP" \
     "${WORKSPACE}/src/asp_ugv_control"
+
+run_section "static UGV Mission3 senior path references" \
+  grep -Rni "mission3_rendezvous_senior\\|start_delay_sec\\|RENDEZVOUS_START_DELAY\\|RENDEZVOUS_REACHED" \
+    "${WORKSPACE}/src/asp_ugv_control" "${WORKSPACE}/src/asp_mission_manager" "${WORKSPACE}/docs"
 
 echo "log_file=${LOG_FILE}" | tee -a "${LOG_FILE}"
