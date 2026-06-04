@@ -38,7 +38,8 @@ class Px4OffboardBridge(Node):
                 ("auto_offboard", True),
                 ("preoffboard_setpoint_count", 20),
                 ("enu_to_ned", True),
-                ("fast_climb_velocity_feedforward_mps", 4.0),
+                ("fast_climb_velocity_feedforward_mps", 8.0),
+                ("fast_climb_acceleration_feedforward_mps2", 4.0),
                 ("fast_climb_error_threshold_m", 1.0),
             ],
         )
@@ -226,19 +227,24 @@ class Px4OffboardBridge(Node):
             dz = float(self.local_position.z) - self.px4_anchor[2]
         return self.map_anchor[2] + dz
 
-    def velocity_feedforward(self, pose, target_px4):
+    def climb_feedforward(self, pose, target_px4):
         velocity = [math.nan, math.nan, math.nan]
+        acceleration = [math.nan, math.nan, math.nan]
         current_map_z = self.current_map_z()
         if current_map_z is None or self.local_position is None:
-            return velocity
+            return velocity, acceleration
         climb_error = float(pose.position.z) - current_map_z
         threshold = float(self.get_parameter("fast_climb_error_threshold_m").value)
         climb_speed = float(self.get_parameter("fast_climb_velocity_feedforward_mps").value)
+        climb_accel = float(self.get_parameter("fast_climb_acceleration_feedforward_mps2").value)
         if climb_speed <= 0.0 or climb_error <= threshold:
-            return velocity
+            return velocity, acceleration
         z_error_px4 = target_px4[2] - float(self.local_position.z)
-        velocity[2] = math.copysign(abs(climb_speed), z_error_px4)
-        return velocity
+        direction = math.copysign(1.0, z_error_px4)
+        velocity[2] = direction * abs(climb_speed)
+        if climb_accel > 0.0:
+            acceleration[2] = direction * abs(climb_accel)
+        return velocity, acceleration
 
     def yaw_enu_to_ned(self, yaw_enu):
         if not self.get_parameter("enu_to_ned").value:
@@ -323,7 +329,7 @@ class Px4OffboardBridge(Node):
             setpoint = TrajectorySetpoint()
             setpoint.timestamp = self.timestamp_us()
             setpoint.position = self.map_pose_to_px4_ned(pose)
-            setpoint.velocity = self.velocity_feedforward(pose, setpoint.position)
+            setpoint.velocity, setpoint.acceleration = self.climb_feedforward(pose, setpoint.position)
             setpoint.yaw = float(self.yaw_enu_to_ned(yaw_from_quaternion(pose.orientation)))
             self.setpoint_pub.publish(setpoint)
             now_ns = self.get_clock().now().nanoseconds

@@ -48,7 +48,7 @@ class UavMissionNode(Node):
                 ("ugv_base_frame", "X1_asp/base_link"),
                 ("ugv_landing_frame", "X1_asp/aruco_marker_10_link"),
                 ("control_period_s", 0.2),
-                ("takeoff_altitude_m", 8.0),
+                ("takeoff_altitude_m", 24.0),
                 ("waypoint_tolerance_m", 1.2),
                 ("waypoint_timeout_s", 14.0),
                 ("marker_action_timeout_s", 4.0),
