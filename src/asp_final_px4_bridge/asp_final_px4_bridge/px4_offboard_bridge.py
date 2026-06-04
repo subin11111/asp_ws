@@ -44,6 +44,7 @@ class Px4OffboardBridge(Node):
                 ("fast_climb_error_threshold_m", 1.0),
                 ("auto_disarm_after_landed", True),
                 ("landed_disarm_delay_sec", 1.0),
+                ("land_command_retry_sec", 1.0),
             ],
         )
         self.last_pose = None
@@ -64,6 +65,8 @@ class Px4OffboardBridge(Node):
         self.land_requested = False
         self.disarm_after_land_sent = False
         self.landed_since_ns = 0
+        self.land_ready_since_ns = 0
+        self.last_land_request_ns = 0
         self.land_detected = None
         self.px4_offboard_enabled = False
         self.px4_armed_flag = False
@@ -190,6 +193,7 @@ class Px4OffboardBridge(Node):
     def on_land(self, msg):
         if msg.data:
             self.land_requested = True
+            self.last_land_request_ns = self.get_clock().now().nanoseconds
             self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
 
     def on_land_detected(self, msg):
@@ -199,6 +203,26 @@ class Px4OffboardBridge(Node):
                 self.landed_since_ns = self.get_clock().now().nanoseconds
         else:
             self.landed_since_ns = 0
+        if self.land_disarm_ready():
+            if self.land_ready_since_ns == 0:
+                self.land_ready_since_ns = self.get_clock().now().nanoseconds
+        else:
+            self.land_ready_since_ns = 0
+
+    def land_disarm_ready(self):
+        if self.land_detected is None:
+            return False
+        return bool(
+            self.land_detected.landed
+            or self.land_detected.maybe_landed
+            or (
+                self.land_detected.close_to_ground_or_skipped_check
+                and self.land_detected.has_low_throttle
+                and not self.land_detected.vertical_movement
+                and not self.land_detected.horizontal_movement
+                and not self.land_detected.rotational_movement
+            )
+        )
 
     def set_px4_anchor_from_local_position(self):
         if self.local_position is None:
@@ -323,8 +347,10 @@ class Px4OffboardBridge(Node):
             "px4_armed": self.px4_armed(),
             "land_requested": self.land_requested,
             "land_detected_landed": bool(self.land_detected and self.land_detected.landed),
+            "land_detected_maybe_landed": bool(self.land_detected and self.land_detected.maybe_landed),
             "land_detected_ground_contact": bool(self.land_detected and self.land_detected.ground_contact),
             "land_detected_at_rest": bool(self.land_detected and self.land_detected.at_rest),
+            "land_disarm_ready": self.land_disarm_ready(),
             "disarm_after_land_sent": self.disarm_after_land_sent,
             "nav_state": int(self.vehicle_status.nav_state) if self.vehicle_status else None,
             "arming_state": int(self.vehicle_status.arming_state) if self.vehicle_status else None,
@@ -337,9 +363,28 @@ class Px4OffboardBridge(Node):
         self.status_pub.publish(msg)
 
     def tick(self):
+        if self.land_requested:
+            now_ns = self.get_clock().now().nanoseconds
+            retry_ns = int(float(self.get_parameter("land_command_retry_sec").value) * 1e9)
+            if self.px4_armed() and now_ns - self.last_land_request_ns >= retry_ns:
+                self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+                self.last_land_request_ns = now_ns
+            if (
+                bool(self.get_parameter("auto_disarm_after_landed").value)
+                and not self.disarm_after_land_sent
+                and self.px4_armed()
+                and self.land_ready_since_ns > 0
+            ):
+                delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)
+                if now_ns - self.land_ready_since_ns >= delay_ns:
+                    self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
+                    self.disarm_after_land_sent = True
+                    self.get_logger().info("Requested PX4 DISARM after landing detector reported near-ground stillness")
+            self.publish_status(throttle=True)
+            return
+
         if (
-            self.land_requested
-            and bool(self.get_parameter("auto_disarm_after_landed").value)
+            bool(self.get_parameter("auto_disarm_after_landed").value)
             and not self.disarm_after_land_sent
             and self.px4_armed()
             and self.landed_since_ns > 0
