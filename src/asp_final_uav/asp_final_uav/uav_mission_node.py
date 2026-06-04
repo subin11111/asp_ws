@@ -52,7 +52,8 @@ class UavMissionNode(Node):
                 ("waypoint_tolerance_m", 1.2),
                 ("waypoint_timeout_s", 14.0),
                 ("marker_action_timeout_s", 4.0),
-                ("hold_after_takeoff_s", 2.0),
+                ("hold_after_takeoff_s", 0.0),
+                ("takeoff_complete_timeout_s", 3.0),
                 ("default_yaw_rad", 0.0),
                 ("enable_mission2_transition_corridor", True),
                 ("transition_corridor_max_step_m", 10.0),
@@ -145,8 +146,9 @@ class UavMissionNode(Node):
                     continue
                 while len(row) < 6:
                     row.append("0")
-                tag = f"csv_wp_{len(waypoints):03d}"
-                waypoints.append(Waypoint(*(float(row[i]) for i in range(5)), int(float(row[5])), tag))
+                tag = row[7].strip() if len(row) > 7 and row[7].strip() else f"csv_wp_{len(waypoints):03d}"
+                hold_sec = float(row[6]) if len(row) > 6 and row[6].strip() else 0.0
+                waypoints.append(Waypoint(*(float(row[i]) for i in range(5)), int(float(row[5])), tag, hold_sec))
         if not waypoints:
             raise RuntimeError(f"No UAV waypoints in {path}")
         return waypoints
@@ -253,7 +255,10 @@ class UavMissionNode(Node):
                 self.publish_text(self.exploration_event_pub, "TAKEOFF_CLIMB_STARTED")
             target_z = max(z, self.takeoff_origin.pose.position.z + float(self.get_parameter("takeoff_altitude_m").value))
             self.cmd_pose_pub.publish(self.pose_msg(x, y, target_z, yaw))
-            if abs(z - target_z) < float(self.get_parameter("waypoint_tolerance_m").value) or self.elapsed(self.phase_started) > 8.0:
+            if (
+                abs(z - target_z) < float(self.get_parameter("waypoint_tolerance_m").value)
+                or self.elapsed(self.phase_started) > float(self.get_parameter("takeoff_complete_timeout_s").value)
+            ):
                 if self.elapsed(self.phase_started) >= float(self.get_parameter("hold_after_takeoff_s").value):
                     self.publish_text(self.exploration_event_pub, "TAKEOFF_HOLD_COMPLETE")
                     self.waypoints = self.build_mission2_runtime_waypoints(x, y, z)

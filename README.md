@@ -988,3 +988,116 @@ tools/diagnostics/ugv_cmd_source_audit.sh
 colcon build --packages-select asp_uav_control asp_ugv_control asp_mission_manager
 python3 tools/diagnostics/mission_path_audit.py
 ```
+
+## 변경 기록: Final Mission2 UAV 안전 경로 및 빠른 이륙 보정
+
+작성 시각: `2026-06-04 16:05:14 KST`
+
+Final mission stack 기준으로 Mission2 UAV가 marker 검출 위치까지 이동할 때 직선 경로가 건물이나
+장애물과 겹칠 수 있는 문제를 줄이도록 `asp_final_uav` runtime waypoint를 재구성했다.
+
+Mission2 marker 검출 순서는 다음과 같이 고정했다.
+
+```text
+7 -> 8 -> 1 -> 0 -> 5 -> 2 -> 4 -> 3 -> 6 -> 9
+```
+
+검출 waypoint는 실제 Gazebo world의 marker pose를 기준으로 잡았다. 지붕/천장 marker는 marker 상공에서
+`gimbal_pitch=-90`으로 내려다보며, 오른쪽 벽면 marker는 marker 오른쪽 바깥에서 marker를 바라보도록
+yaw와 gimbal pitch를 계산했다.
+
+기존처럼 marker마다 `roof/E/W/N/S` 후보를 모두 도는 방식은 제거했다. 대신 실제 검출 waypoint 사이에
+충돌 회피용 transit waypoint를 추가했다.
+
+```text
+marker detect waypoint
+  -> 같은 x/y에서 38m 안전 고도까지 상승
+  -> 38m 고도에서 수평 이동
+  -> 다음 marker 검출 고도로 하강
+  -> 다음 marker detect waypoint
+```
+
+Mission2 마지막 marker인 `marker_9_roof_detect` 이후에는 바로 Mission2 완료로 끝내지 않고,
+UGV rendezvous 최종 지점 상공으로 이동한 뒤 Mission2 완료가 되도록 했다.
+
+```text
+marker_9_roof_detect
+  -> 38m 안전 고도 상승
+  -> UGV rendezvous endpoint 상공 이동
+  -> landing_stage_rendezvous
+```
+
+따라서 Mission4 landing 시작 시 UAV가 marker zone에서 UGV 쪽으로 낮은 고도로 직선 이동하지 않고,
+이미 rendezvous 지점 상공에 있는 상태에서 착륙 단계로 넘어간다.
+
+`mission2_uav_waypoints.csv`의 CSV format은 기존 6개 필드에 선택 필드 `hold_sec`, `tag`를 추가했다.
+
+```text
+x,y,z,yaw_rad,gimbal_pitch_deg,marker_budget,hold_sec,tag
+```
+
+`uav_mission_node.py`는 기존 6필드 CSV도 그대로 읽을 수 있고, 7번째/8번째 필드가 있으면 다음처럼 사용한다.
+
+```text
+hold_sec: 해당 waypoint 도착 후 유지 시간
+tag: exploration event와 log에 표시할 waypoint 이름
+```
+
+검출 waypoint에는 `hold_sec=4.0`을 넣어 marker 검출 시간을 확보했다. transit waypoint는
+`marker_budget=0`, `hold_sec=0.0`으로 두어 검출 대기 없이 이동만 담당한다.
+
+Mission2/3 병렬 시작 시 UAV가 빠르게 위로 빠지도록 takeoff 구간도 보정했다.
+
+```yaml
+takeoff_altitude_m: 24.0
+hold_after_takeoff_s: 0.0
+takeoff_complete_timeout_s: 3.0
+```
+
+takeoff phase는 시작 위치에서 24m 목표 고도를 publish하고, 별도 hover 대기 없이 빠르게 transition
+corridor로 넘어간다. 3초 안에 목표 고도에 완전히 도달하지 못해도 transition corridor가 같은 위치에서
+고도 확보를 이어가므로, 수평 이동 전에 UAV가 충분히 상승하도록 유지된다.
+
+PX4 offboard bridge에는 상승 중 z축 velocity feedforward를 추가했다.
+
+```yaml
+fast_climb_velocity_feedforward_mps: 4.0
+fast_climb_error_threshold_m: 1.0
+```
+
+현재 map z와 target z 차이가 threshold보다 클 때만 `TrajectorySetpoint.velocity`의 z축 feedforward를
+넣는다. 하강이나 착륙에는 적용하지 않으므로 landing descent 동작은 기존 흐름을 유지한다.
+
+최종 변경 파일은 다음과 같다.
+
+```text
+src/asp_final_uav/path/mission2_uav_waypoints.csv
+src/asp_final_uav/asp_final_uav/uav_mission_node.py
+src/asp_final_uav/config/uav_params.yaml
+src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+```
+
+검증 결과는 다음과 같다.
+
+```text
+Mission2 UAV waypoints: 78
+Detect order: 7 -> 8 -> 1 -> 0 -> 5 -> 2 -> 4 -> 3 -> 6 -> 9
+Final waypoint: landing_stage_rendezvous
+Max horizontal segment: 8.94m
+Max vertical delta: 8.00m
+final_path_audit.py warnings: 0
+```
+
+빌드는 다음 명령으로 확인했다.
+
+```bash
+python3 -m py_compile \
+  src/asp_final_uav/asp_final_uav/uav_mission_node.py \
+  src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+
+python3 src/asp_final_tools/asp_final_tools/final_path_audit.py \
+  src/asp_final_uav/path/mission2_uav_waypoints.csv
+
+colcon build --packages-select \
+  asp_final_uav asp_final_px4_bridge asp_final_tools asp_final_bringup asp_final_mission
+```
