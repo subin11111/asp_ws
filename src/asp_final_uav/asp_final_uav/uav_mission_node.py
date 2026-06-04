@@ -319,7 +319,6 @@ class UavMissionNode(Node):
         if self.phase == "landing":
             self.publish_text(self.landing_state_pub, "landing")
             ugv_xy = self.current_ugv_landing_xy()
-            hover_alt = float(self.get_parameter("landing_hover_altitude_m").value)
             if ugv_xy is not None:
                 self.landing_target_xy = ugv_xy
             elif self.landing_target_xy is None:
@@ -331,14 +330,14 @@ class UavMissionNode(Node):
                 )
             target_x, target_y = self.landing_target_xy
             xy_error = math.hypot(target_x - x, target_y - y)
-            target_z = max(float(self.get_parameter("landing_complete_altitude_m").value), z - float(self.get_parameter("landing_descent_step_m").value))
+            descent_step = float(self.get_parameter("landing_descent_step_m").value)
+            complete_alt = float(self.get_parameter("landing_complete_altitude_m").value)
+            target_z = max(complete_alt, z - descent_step)
             if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value):
-                target_z = max(float(self.get_parameter("landing_approach_altitude_m").value), z)
-            elif z > hover_alt:
-                target_z = max(hover_alt, z - float(self.get_parameter("landing_descent_step_m").value))
+                target_z = max(float(self.get_parameter("landing_approach_altitude_m").value), z - descent_step)
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, yaw))
             ready_to_land = (
-                z <= float(self.get_parameter("landing_complete_altitude_m").value)
+                z <= complete_alt
                 and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
             )
             timed_out_on_target = (

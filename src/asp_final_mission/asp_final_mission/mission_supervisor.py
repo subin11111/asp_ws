@@ -35,7 +35,9 @@ class MissionSupervisor(Node):
         self.create_subscription(Bool, "/asp_final/mission/reset", self.on_reset, qos)
         self.create_subscription(Bool, "/asp_final/ugv/mission1_complete", self.on_mission1_done, qos)
         self.create_subscription(Bool, "/asp_final/uav/mission2_complete", self.on_mission2_done, qos)
+        self.create_subscription(String, "/asp_final/uav/exploration_state", self.on_uav_state, qos)
         self.create_subscription(Bool, "/asp_final/ugv/rendezvous_reached", self.on_rendezvous_done, qos)
+        self.create_subscription(String, "/asp_final/ugv/state", self.on_ugv_state, qos)
         self.create_subscription(Bool, "/asp_final/landing/complete", self.on_landing_done, qos)
 
         self.timer = self.create_timer(0.5, self.tick)
@@ -76,8 +78,16 @@ class MissionSupervisor(Node):
         if msg.data:
             self.mission2_done = True
 
+    def on_uav_state(self, msg):
+        if msg.data in ("mission2_complete", "complete"):
+            self.mission2_done = True
+
     def on_rendezvous_done(self, msg):
         if msg.data:
+            self.rendezvous_done = True
+
+    def on_ugv_state(self, msg):
+        if msg.data == "MISSION3_COMPLETE":
             self.rendezvous_done = True
 
     def on_landing_done(self, msg):
@@ -94,7 +104,7 @@ class MissionSupervisor(Node):
         if self.state == MissionState.MISSION2_3_PARALLEL and self.mission2_done and self.rendezvous_done:
             self.state = MissionState.MISSION4_LANDING
             self.publish_bool(self.landing_start_pub)
-            self.publish_text(self.status_pub, "Mission4 precision landing started after both parallel branches completed")
+            self.publish_text(self.status_pub, "Mission4 precision landing started after UAV waypoints and UGV Mission3 completed")
 
         if self.state == MissionState.MISSION4_LANDING and self.landing_done:
             self.state = MissionState.COMPLETE

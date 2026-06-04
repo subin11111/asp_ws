@@ -1101,3 +1101,79 @@ python3 src/asp_final_tools/asp_final_tools/final_path_audit.py \
 colcon build --packages-select \
   asp_final_uav asp_final_px4_bridge asp_final_tools asp_final_bringup asp_final_mission
 ```
+
+## 변경 기록: Final Mission2/3 완료 조건 및 착륙 전환 정리
+
+작성 시각: `2026-06-05 00:33:04 KST`
+
+Final mission stack 기준으로 UAV Mission2, UGV Mission3, Mission4 landing 전환 조건을 현재 테스트 흐름에 맞게 정리했다.
+
+UAV Mission2 waypoint는 marker 검출 순서만 남기고 마지막 rendezvous 상공 상승 waypoint를 제거했다.
+
+```text
+7 -> 8 -> 1 -> 0 -> 5 -> 2 -> 4 -> 3 -> 6 -> 9
+```
+
+따라서 `marker_9_roof_detect` 이후 별도 `landing_stage_rendezvous` waypoint로 38m까지 상승하지 않는다.
+
+초반 이륙 고도는 나무와 충돌할 수 있는 과도한 상승을 줄이기 위해 낮췄다.
+
+```yaml
+takeoff_altitude_m: 10.0
+```
+
+Mission4 landing 전환은 marker detection 성공 여부가 아니라 UAV waypoint sequence 완료와 UGV Mission3 완료를 기준으로 한다.
+Bool topic을 한 번 놓치는 경우를 줄이기 위해 지속 publish되는 state topic도 함께 확인한다.
+
+```text
+/asp_final/uav/mission2_complete
+/asp_final/uav/exploration_state: mission2_complete
+/asp_final/ugv/rendezvous_reached
+/asp_final/ugv/state: MISSION3_COMPLETE
+```
+
+Landing phase에서는 4m hover 고도에서 멈추지 않고 `landing_complete_altitude_m`까지 계속 하강하도록 했다.
+이 변경은 `phase == "landing"` 안에서만 적용되며, takeoff/explore waypoint publish 로직은 건드리지 않는다.
+
+```yaml
+landing_descent_step_m: 1.0
+landing_complete_altitude_m: 3.0
+landing_approach_altitude_m: 8.0
+```
+
+UGV Mission3는 UAV 이륙 직후 이탈을 줄이기 위해 시작 전 delay와 초기 저속 구간을 유지하고,
+이후 주행 구간에서만 속도를 높이도록 2단 profile을 사용한다.
+
+```yaml
+mission3_start_delay_sec: 3.0
+mission3_initial_cruise_speed: 1.6
+mission3_initial_max_linear_speed: 2.0
+mission3_initial_max_linear_accel: 1.0
+mission3_boost_after_sec: 5.0
+mission3_cruise_speed: 3.0
+mission3_max_linear_speed: 3.5
+mission3_max_linear_accel: 1.8
+```
+
+최종 변경 파일은 다음과 같다.
+
+```text
+src/asp_final_mission/asp_final_mission/mission_supervisor.py
+src/asp_final_uav/asp_final_uav/uav_mission_node.py
+src/asp_final_uav/config/uav_params.yaml
+src/asp_final_uav/path/mission2_uav_waypoints.csv
+src/asp_final_ugv/asp_final_ugv/ugv_path_follower.py
+src/asp_final_ugv/config/ugv_params.yaml
+```
+
+검증은 다음 명령으로 확인했다.
+
+```bash
+python3 -m py_compile \
+  src/asp_final_mission/asp_final_mission/mission_supervisor.py \
+  src/asp_final_uav/asp_final_uav/uav_mission_node.py \
+  src/asp_final_ugv/asp_final_ugv/ugv_path_follower.py
+
+colcon build --packages-select \
+  asp_final_mission asp_final_uav asp_final_ugv
+```

@@ -27,13 +27,18 @@ asp_final_ugv_path_follower:
     mission1_corner_slowdown_enabled: true
     mission1_corner_slowdown_speed: 0.5
 
-    # Mission3: faster rendezvous mode
-    mission3_cruise_speed: 2.0
-    mission3_max_linear_speed: 2.5
-    mission3_min_linear_speed: 2.5
-    mission3_max_angular_speed: 2.5
-    mission3_max_linear_accel: 2.5
-    mission3_max_angular_accel: 2.5
+    # Mission3: senior-style rendezvous mode
+    mission3_cruise_speed: 3.0
+    mission3_max_linear_speed: 3.5
+    mission3_min_linear_speed: 0.35
+    mission3_max_angular_speed: 2.2
+    mission3_max_linear_accel: 1.8
+    mission3_max_angular_accel: 1.6
+    mission3_initial_cruise_speed: 1.6
+    mission3_initial_max_linear_speed: 2.0
+    mission3_initial_max_linear_accel: 1.0
+    mission3_boost_after_sec: 5.0
     mission3_lookahead_distance: 3.5
     mission3_waypoint_tolerance: 1.2
     mission3_slow_down_distance: 2.0
+    mission3_start_delay_sec: 3.0

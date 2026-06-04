@@ -6,6 +6,7 @@ from pathlib import Path
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Twist
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
@@ -69,9 +70,14 @@ class UgvPathFollower(Node):
                 ("mission3_max_angular_speed", 1.2),
                 ("mission3_max_linear_accel", 0.60),
                 ("mission3_max_angular_accel", 0.90),
+                ("mission3_initial_cruise_speed", 1.6),
+                ("mission3_initial_max_linear_speed", 2.0),
+                ("mission3_initial_max_linear_accel", 1.0),
+                ("mission3_boost_after_sec", 5.0),
                 ("mission3_lookahead_distance", 3.5),
                 ("mission3_waypoint_tolerance", 1.2),
                 ("mission3_slow_down_distance", 2.0),
+                ("mission3_start_delay_sec", 1.5),
                 ("zero_publish_after_stop_count", 5),
                 ("disable_cmd_after_stop", True),
             ],
@@ -89,6 +95,8 @@ class UgvPathFollower(Node):
         self.prev_w = 0.0
         self.last_cmd_time = self.now()
         self.completed = {"mission1": False, "rendezvous": False}
+        self.rendezvous_delay_until = None
+        self.rendezvous_motion_started_at = None
 
         self.cmd_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, 10)
         self.m1_done_pub = self.create_publisher(Bool, "/asp_final/ugv/mission1_complete", 10)
@@ -136,6 +144,9 @@ class UgvPathFollower(Node):
     def now(self):
         return self.get_clock().now()
 
+    def elapsed(self, stamp):
+        return (self.now() - stamp).nanoseconds * 1e-9
+
     def start_mode(self, mode):
         if self.completed.get(mode):
             return
@@ -148,6 +159,17 @@ class UgvPathFollower(Node):
         self.publish_text(self.event_pub, f"UGV_MODE:{self.active_mode}")
         self.publish_text(self.event_pub, f"{mode}_started")
         self.log_profile()
+        if mode == "rendezvous":
+            delay_sec = float(self.get_parameter("mission3_start_delay_sec").value)
+            if delay_sec > 0.0:
+                self.active_mode = "MISSION3_START_DELAY"
+                self.rendezvous_delay_until = self.now() + Duration(seconds=delay_sec)
+                self.stop()
+                self.publish_text(self.event_pub, "rendezvous_start_delay_started")
+                self.get_logger().info(f"Mission3 rendezvous delayed for {delay_sec:.2f} seconds")
+            else:
+                self.rendezvous_delay_until = None
+                self.rendezvous_motion_started_at = self.now()
 
     def on_mission1_start(self, msg):
         if msg.data and self.mode == "idle":
@@ -205,7 +227,7 @@ class UgvPathFollower(Node):
 
     def profile(self):
         prefix = self.profile_prefix()
-        return {
+        profile = {
             "cruise_speed": float(self.get_parameter(f"{prefix}_cruise_speed").value),
             "max_linear_speed": float(self.get_parameter(f"{prefix}_max_linear_speed").value),
             "min_linear_speed": float(self.get_parameter(f"{prefix}_min_linear_speed").value),
@@ -215,6 +237,13 @@ class UgvPathFollower(Node):
             "waypoint_tolerance": float(self.get_parameter(f"{prefix}_waypoint_tolerance").value),
             "slow_down_distance": float(self.get_parameter(f"{prefix}_slow_down_distance").value),
         }
+        if self.mode == "rendezvous":
+            boost_after = float(self.get_parameter("mission3_boost_after_sec").value)
+            if self.rendezvous_motion_started_at is None or self.elapsed(self.rendezvous_motion_started_at) < boost_after:
+                profile["cruise_speed"] = float(self.get_parameter("mission3_initial_cruise_speed").value)
+                profile["max_linear_speed"] = float(self.get_parameter("mission3_initial_max_linear_speed").value)
+                profile["max_linear_accel"] = float(self.get_parameter("mission3_initial_max_linear_accel").value)
+        return profile
 
     def log_profile(self):
         profile = self.profile()
@@ -246,6 +275,16 @@ class UgvPathFollower(Node):
         self.publish_text(self.state_pub, self.active_mode)
         if self.mode not in ("mission1", "rendezvous"):
             return
+        if self.mode == "rendezvous" and self.rendezvous_delay_until is not None:
+            self.stop()
+            self.last_cmd_time = self.now()
+            if self.now() < self.rendezvous_delay_until:
+                return
+            self.rendezvous_delay_until = None
+            self.rendezvous_motion_started_at = self.now()
+            self.active_mode = "MISSION3_RENDEZVOUS"
+            self.publish_text(self.event_pub, "rendezvous_start_delay_complete")
+            self.publish_text(self.event_pub, f"UGV_MODE:{self.active_mode}")
         try:
             x, y, _z, yaw = self.current_pose()
         except TransformException as exc:
