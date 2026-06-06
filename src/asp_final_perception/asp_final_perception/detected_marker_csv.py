@@ -1,4 +1,5 @@
 import csv
+from dataclasses import dataclass
 from pathlib import Path
 
 import rclpy
@@ -25,6 +26,14 @@ def parse_allowed_marker_ids(value):
     return allowed
 
 
+@dataclass
+class StoredMarker:
+    pose: object
+    first_seen_time_sec: float
+    last_seen_time_sec: float
+    detection_count: int = 1
+
+
 class DetectedMarkerCsv(Node):
     def __init__(self):
         super().__init__("asp_final_detected_marker_csv")
@@ -49,6 +58,8 @@ class DetectedMarkerCsv(Node):
         self.get_logger().info(f"detected marker CSV will be saved to {self.csv_path}; allowed_marker_ids={allowed}")
 
     def on_detections(self, msg):
+        stamp = self.get_clock().now()
+        seen_time_sec = stamp.nanoseconds * 1e-9
         for detection in msg.detections:
             if not detection.results:
                 continue
@@ -61,7 +72,19 @@ class DetectedMarkerCsv(Node):
                 continue
             if self.allowed_marker_ids and parsed_id not in self.allowed_marker_ids:
                 continue
-            self.stored_markers[str(marker_id)] = result.pose.pose
+            marker_key = str(marker_id)
+            if marker_key not in self.stored_markers:
+                self.stored_markers[marker_key] = StoredMarker(
+                    pose=result.pose.pose,
+                    first_seen_time_sec=seen_time_sec,
+                    last_seen_time_sec=seen_time_sec,
+                )
+                self.get_logger().info(f"first detected UAV marker {marker_key} at {seen_time_sec:.3f}s")
+                continue
+            stored_marker = self.stored_markers[marker_key]
+            stored_marker.pose = result.pose.pose
+            stored_marker.last_seen_time_sec = seen_time_sec
+            stored_marker.detection_count += 1
 
     def save_to_csv(self):
         if not self.stored_markers:
@@ -69,13 +92,28 @@ class DetectedMarkerCsv(Node):
             return
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
         with self.csv_path.open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["marker_id", "pos_x", "pos_y", "pos_z"])
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "marker_id",
+                    "first_seen_time_sec",
+                    "last_seen_time_sec",
+                    "detection_count",
+                    "pos_x",
+                    "pos_y",
+                    "pos_z",
+                ],
+            )
             writer.writeheader()
             for marker_id in sorted(self.stored_markers.keys(), key=int):
-                pose = self.stored_markers[marker_id]
+                stored_marker = self.stored_markers[marker_id]
+                pose = stored_marker.pose
                 writer.writerow(
                     {
                         "marker_id": marker_id,
+                        "first_seen_time_sec": f"{stored_marker.first_seen_time_sec:.6f}",
+                        "last_seen_time_sec": f"{stored_marker.last_seen_time_sec:.6f}",
+                        "detection_count": stored_marker.detection_count,
                         "pos_x": pose.position.x,
                         "pos_y": pose.position.y,
                         "pos_z": pose.position.z,

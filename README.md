@@ -1385,3 +1385,152 @@ python3 -m py_compile \
 colcon build --packages-select \
   asp_final_gazebo_bridge asp_final_perception asp_final_uav
 ```
+
+## 변경 기록: Final UAV Mission2 전체 검출 및 gimbal pitch 보정
+
+작성 시각: `2026-06-07 01:53:15 KST`
+
+마지막 push 이후에는 Mission2 marker 검출 수가 실행마다 달라지는 문제를 따라가며, UAV가 실제로 marker를
+볼 수 있는 자세와 waypoint 진행 조건을 함께 정리했다. 처음에는 waypoint 자체는 목표 marker 위치를 향하고
+있었지만, roof marker를 위에서 내려다보는 구간에서도 camera가 아래를 제대로 보지 못하는 정황이 있었다.
+또한 marker waypoint에 충분히 도착하기 전에 timeout/force advance 조건으로 다음 waypoint로 넘어갈 수 있어,
+검출이 되더라도 안정적으로 유지되는 시간이 부족했다.
+
+### Waypoint 진행 조건 조정
+
+UAV Mission2에서는 marker 위치에 도착한 뒤 camera가 marker를 볼 시간이 필요하다. 기존 설정은 XY가 어느 정도
+가까워지면 z축이 아직 맞지 않아도 강제 진행될 수 있었고, marker timeout continue도 marker waypoint에서
+조기 진행을 만들 수 있었다.
+
+이번 변경에서는 코드 로직은 유지하고 parameter만 조정해 marker waypoint에서 더 확실히 도착한 뒤 진행하도록 했다.
+
+```yaml
+waypoint_timeout_s: 20.0
+waypoint_xy_tolerance_m: 1.5
+waypoint_z_tolerance_m: 1.0
+waypoint_stuck_timeout_sec: 18.0
+max_same_waypoint_sec: 20.0
+force_advance_when_xy_close: false
+continue_on_marker_timeout: false
+marker_wait_timeout_sec: 8.0
+```
+
+이 설정은 단순히 오래 기다리게 만드는 것이 아니라, XY만 가까운 상태에서 다음 waypoint로 넘어가는 우회 진행을
+줄이는 데 목적이 있다. 특히 roof marker는 고도와 gimbal pitch가 함께 맞아야 하므로 `waypoint_z_tolerance_m`을
+1.0m로 유지했다.
+
+Mission2 waypoint CSV에서는 roof marker 중 지나치듯 검출되던 구간의 hold 시간을 조정했다.
+
+```text
+marker_7_roof_detect: hold_sec 7.0
+marker_8_roof_detect: hold_sec 8.0
+marker_4_roof_detect: hold_sec 8.0
+```
+
+### Gimbal pitch 명령 보정
+
+CSV에는 roof marker에서 `gimbal_pitch_deg=-90.0`이 들어가 있었지만, PX4 bridge에서는 이 값이 실제 pitch
+parameter로 전달되지 않고 있었다. 기존 bridge는 `VEHICLE_CMD_DO_MOUNT_CONTROL`에 pitch 값을 `param7`로
+넣고 있었고, 이 경우 `-90도` 명령이 camera pitch로 제대로 반영되지 않을 수 있었다.
+
+이번 변경에서는 `/asp_final/uav/gimbal_pitch_deg` 값을 PX4 gimbal manager 명령으로 전달하도록 바꿨다.
+
+```text
+VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE
+VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW
+```
+
+pitch 값은 `param1`, yaw 값은 `param2`로 들어간다.
+
+```text
+param1 = gimbal_pitch_deg
+param2 = 0.0
+param7 = gimbal_device_id
+```
+
+Gazebo gimbal model의 pitch joint 제한도 확인했다. pitch joint는 대략 `-135도 ~ +45도` 범위이므로
+Mission2 roof marker에서 사용하는 `-90도`는 하드웨어/모델 제한에 걸리지 않는다. 따라서 roof marker 미검출의
+주요 원인은 waypoint 위치보다 gimbal pitch 명령 전달 방식일 가능성이 컸고, 이 부분을 수정했다.
+
+### 검출 CSV 시각 정보 추가
+
+전체 검출 이후에도 어떤 marker에서 필요 이상으로 기다렸는지 확인하려면 marker별 최초 검출 시각이 필요했다.
+기존 CSV는 종료 시점의 마지막 좌표만 저장했기 때문에, 검출 시점과 waypoint hold 시간을 비교할 수 없었다.
+
+이번 변경에서는 CSV 저장 node가 marker별 최초 검출 시각, 마지막 검출 시각, 검출 횟수를 함께 저장하도록 했다.
+
+```text
+marker_id,first_seen_time_sec,last_seen_time_sec,detection_count,pos_x,pos_y,pos_z
+```
+
+또한 최초 검출 시점은 로그에도 남긴다.
+
+```text
+first detected UAV marker 8 at 1780764490.276s
+```
+
+이제 다음 실행부터는 marker가 처음 보인 시점과 waypoint 이동 로그를 비교해, 실제 검출 이후에도 오래 머문
+marker를 정량적으로 확인할 수 있다.
+
+### 최신 검출 결과
+
+최신 실행에서는 Mission2 목표 marker `0~9`가 모두 CSV에 저장되었다.
+
+```text
+detected_ids: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
+missing_ids: none
+```
+
+검출 순서와 횟수는 다음과 같다.
+
+```text
+ID 7: first=1780764480.608, count=42
+ID 5: first=1780764489.549, count=87
+ID 8: first=1780764490.276, count=6
+ID 1: first=1780764497.257, count=14
+ID 0: first=1780764498.429, count=38
+ID 2: first=1780764514.217, count=20
+ID 9: first=1780764521.619, count=62
+ID 4: first=1780764523.330, count=5
+ID 3: first=1780764527.893, count=21
+ID 6: first=1780764530.170, count=9
+```
+
+실제 world marker 좌표와 비교한 오차는 다음과 같다.
+
+```text
+ID 0: dxy=0.47m, dz=0.10m, d3=0.48m
+ID 1: dxy=5.35m, dz=6.42m, d3=8.36m
+ID 2: dxy=0.81m, dz=-0.17m, d3=0.83m
+ID 3: dxy=0.59m, dz=1.11m, d3=1.25m
+ID 4: dxy=0.50m, dz=0.17m, d3=0.52m
+ID 5: dxy=1.51m, dz=-0.89m, d3=1.75m
+ID 6: dxy=1.09m, dz=1.02m, d3=1.49m
+ID 7: dxy=0.81m, dz=-0.45m, d3=0.93m
+ID 8: dxy=0.67m, dz=0.18m, d3=0.70m
+ID 9: dxy=0.50m, dz=-0.31m, d3=0.59m
+```
+
+대부분의 marker는 실제 위치와 잘 맞았다. 다만 `1`번 marker는 최신 실행에서 좌표 오차가 크게 튀었고,
+검출 좌표가 실제 `1`번보다 실제 `8`번 위치에 더 가까웠다. 따라서 전체 검출은 성공했지만 `1`번 marker의
+pose 안정성은 추가 확인이 필요하다.
+
+최종 변경 파일은 다음과 같다.
+
+```text
+src/asp_final_perception/asp_final_perception/detected_marker_csv.py
+src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+src/asp_final_uav/config/uav_params.yaml
+src/asp_final_uav/path/mission2_uav_waypoints.csv
+```
+
+검증은 다음 명령으로 확인했다.
+
+```bash
+python3 -m py_compile \
+  src/asp_final_perception/asp_final_perception/detected_marker_csv.py \
+  src/asp_final_px4_bridge/asp_final_px4_bridge/px4_offboard_bridge.py
+
+colcon build --packages-select \
+  asp_final_perception asp_final_px4_bridge
+```

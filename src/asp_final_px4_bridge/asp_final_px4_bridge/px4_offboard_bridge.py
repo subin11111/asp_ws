@@ -28,6 +28,8 @@ class Px4OffboardBridge(Node):
     MY_COMPID = 47
     TARGET_SYSID = 1
     TARGET_COMPID = 1
+    GIMBAL_DEVICE_ID = 1
+    GIMBAL_MANAGER_FLAGS = 12
 
     def __init__(self):
         super().__init__("asp_final_px4_offboard_bridge")
@@ -56,6 +58,7 @@ class Px4OffboardBridge(Node):
         self.vehicle_status = None
         self.vehicle_control_mode = None
         self.last_command_ack = None
+        self.gimbal_configured = False
         self.map_anchor = None
         self.px4_anchor = None
         self.last_offboard_request_ns = 0
@@ -175,10 +178,25 @@ class Px4OffboardBridge(Node):
 
     def on_gimbal_pitch(self, msg):
         self.gimbal_pitch = msg.data
+        if not self.gimbal_configured:
+            self.vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE,
+                param1=self.MY_SYSID,
+                param2=self.MY_COMPID,
+                param3=0.0,
+                param4=0.0,
+                param5=self.GIMBAL_MANAGER_FLAGS,
+                param7=self.GIMBAL_DEVICE_ID,
+            )
+            self.gimbal_configured = True
         self.vehicle_command(
-            VehicleCommand.VEHICLE_CMD_DO_MOUNT_CONTROL,
-            param1=1.0,
-            param7=float(msg.data),
+            VehicleCommand.VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW,
+            param1=float(msg.data),
+            param2=0.0,
+            param3=math.nan,
+            param4=math.nan,
+            param5=self.GIMBAL_MANAGER_FLAGS,
+            param7=self.GIMBAL_DEVICE_ID,
         )
 
     def on_takeoff_origin(self, msg):

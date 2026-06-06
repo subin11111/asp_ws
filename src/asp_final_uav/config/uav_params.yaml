@@ -8,7 +8,7 @@ asp_final_uav_mission_node:
     control_period_s: 0.2
     takeoff_altitude_m: 10.0
     waypoint_tolerance_m: 1.2
-    waypoint_timeout_s: 14.0
+    waypoint_timeout_s: 20.0
     marker_action_timeout_s: 4.0
     hold_after_takeoff_s: 0.0
     takeoff_complete_timeout_s: 3.0
@@ -21,17 +21,17 @@ asp_final_uav_mission_node:
     transition_corridor_gimbal_pitch_deg: -60.0
     transition_corridor_tag_prefix: "mission2_transition"
     waypoint_arrival_mode: "xy_z_separate"
-    waypoint_xy_tolerance_m: 2.5
-    waypoint_z_tolerance_m: 3.0
+    waypoint_xy_tolerance_m: 1.5
+    waypoint_z_tolerance_m: 1.0
     ignore_yaw_for_waypoint_reached: true
     yaw_tolerance_deg: 45.0
-    waypoint_stuck_timeout_sec: 12.0
-    max_same_waypoint_sec: 15.0
+    waypoint_stuck_timeout_sec: 18.0
+    max_same_waypoint_sec: 20.0
     force_advance_on_stuck: true
-    force_advance_when_xy_close: true
+    force_advance_when_xy_close: false
     xy_close_timeout_sec: 5.0
-    continue_on_marker_timeout: true
-    marker_wait_timeout_sec: 3.0
+    continue_on_marker_timeout: false
+    marker_wait_timeout_sec: 8.0
     do_not_block_waypoint_progress_on_marker: true
     landing_hover_altitude_m: 4.0
     landing_descent_step_m: 1.0
