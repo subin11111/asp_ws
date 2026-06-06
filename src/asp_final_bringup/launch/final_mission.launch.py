@@ -64,5 +64,11 @@ def generate_launch_description():
                 parameters=[str(perception_params), {"mode": "landing"}],
                 output="screen",
             ),
+            Node(
+                package="asp_final_perception",
+                executable="detected_marker_csv",
+                name="asp_final_detected_marker_csv",
+                output="screen",
+            ),
         ]
     )

@@ -1241,3 +1241,147 @@ python3 -m py_compile \
 colcon build --packages-select \
   asp_final_uav asp_final_px4_bridge
 ```
+
+## 변경 기록: Final UAV marker 좌표 저장 및 Mission2 검출 안정화
+
+작성 시각: `2026-06-07 00:35:39 KST`
+
+마지막 push 이후에는 UAV Mission2 marker 검출 결과를 실제 월드 좌표와 비교할 수 있도록 perception pipeline과
+CSV 저장 흐름을 정리했다. 초기에는 marker detection topic이 문자열 JSON 형태라 landing logic과 결과 저장을
+각자 다르게 해석하고 있었고, 실행 종료 후 실제로 어떤 marker 좌표가 남았는지 확인하기 어려웠다.
+
+이번 변경에서는 ArUco detector가 `vision_msgs/Detection3DArray`를 publish하도록 바꾸고, UAV marker detection
+결과를 종료 시 CSV로 저장하는 전용 node를 추가했다.
+
+```text
+/asp_final/perception/uav/marker_detections
+  -> asp_final_detected_marker_csv
+  -> /home/subin/ros2_ws/mission_logs/asp_final_detected_markers.csv
+```
+
+CSV format은 다음과 같다.
+
+```text
+marker_id,pos_x,pos_y,pos_z
+```
+
+처음 저장된 결과에서는 `10`, `17`, `24`, `37`, `44`처럼 Mission2 목표가 아닌 ID가 함께 남았다.
+실제 world marker table과 비교해 보니 `10`은 UGV landing marker이고, 나머지는 실제 배치된 target marker가
+아니었다. 그래서 Mission2 UAV detector와 CSV 저장 node에는 관심 ID filter를 추가했다.
+
+```yaml
+asp_final_uav_aruco_detector:
+  allowed_marker_ids: "0,1,2,3,4,5,6,7,8,9"
+
+asp_final_landing_aruco_detector:
+  allowed_marker_ids: "10"
+```
+
+Landing detector는 Mission4 landing에서만 쓰이는 `10`번 marker를 유지하고, Mission2 UAV detector는
+목표 marker `0~9`만 publish한다. CSV 저장 node도 같은 `0~9` filter를 한 번 더 적용해 false positive가
+결과 파일에 섞이지 않게 했다.
+
+좌표 저장값이 실제 world marker 좌표와 맞지 않는 문제도 함께 확인했다. 원인은 camera optical frame을 그대로
+map 변환에 사용하면서 OpenCV marker pose의 RDF 좌표계와 TF frame 해석이 어긋날 수 있는 점이었다.
+Gazebo TF broadcaster에서 UAV camera frame의 RDF 보조 frame을 publish하도록 했다.
+
+```text
+x500_gimbal_0/camera_link
+  -> x500_gimbal_0/camera_link_rdf
+```
+
+RDF frame은 기존 camera transform에 다음 회전을 곱해 생성한다.
+
+```text
+RPY(-pi/2, 0, pi/2)
+```
+
+Perception 설정은 UAV detector와 landing detector 모두 `x500_gimbal_0/camera_link_rdf`를 사용하도록 바꿨다.
+
+```yaml
+camera_frame: x500_gimbal_0/camera_link_rdf
+```
+
+Mission2 waypoint도 검출 상황에 맞게 소폭 정리했다. 특히 `marker_8_roof_detect`는 roof marker를 안정적으로
+보기 위해 z축을 올렸고, roof marker 계열은 지나치듯 통과하는 경우를 줄이기 위해 hold 시간을 일부 늘렸다.
+
+```text
+marker_7_roof_detect: hold_sec 6.0
+marker_8_roof_detect: z 35.375645, hold_sec 5.0
+marker_5_roof_detect: hold_sec 5.0
+marker_2_roof_detect: hold_sec 6.0
+marker_4_roof_detect: hold_sec 6.0
+marker_9_roof_detect: hold_sec 5.0
+```
+
+이 과정에서 `hold_sec` 자체는 이동 중에 차감되는 시간이 아니라 waypoint 도착 판정 이후 유지 시간이라는 점도
+확인했다. 다만 현재 UAV mission node에는 `marker_timeout_continue` 조건이 있어, marker waypoint 근처에서
+일정 시간이 지나면 도착 hold와 별개로 다음 waypoint로 넘어갈 수 있다.
+
+```yaml
+continue_on_marker_timeout: true
+marker_wait_timeout_sec: 3.0
+do_not_block_waypoint_progress_on_marker: true
+```
+
+따라서 roof marker가 시뮬레이션 화면에서 지나치듯 보이는 경우는 `hold_sec`가 이동 중에 끝나는 것이 아니라,
+도착 판정 전에 marker timeout continue가 먼저 발동했을 가능성이 크다. 이후 충돌/미검출 분석 시에는
+waypoint advance reason과 실제 advance 시점의 `dxy`, `dz`를 같이 보는 것이 필요하다.
+
+최종 검출 확인에서는 false positive가 제거되고 목표 ID만 CSV에 남았다. 최신 확인 기준 검출된 marker는 다음과 같다.
+
+```text
+0, 1, 3, 5, 6, 8
+```
+
+실제 world marker 좌표와의 오차는 대부분 1m 이내였다.
+
+```text
+ID 0: d3=0.414m
+ID 1: d3=2.752m
+ID 3: d3=0.535m
+ID 5: d3=0.235m
+ID 6: d3=0.913m
+ID 8: d3=0.658m
+```
+
+특히 문제가 되었던 `8`번 marker는 다음처럼 실제 위치와 유사하게 저장되었다.
+
+```text
+actual: (-105.369, 100.032, 23.551)
+truth : (-105.975,  99.843, 23.376)
+error : d3=0.658m
+```
+
+미검출로 남은 target marker는 다음과 같다.
+
+```text
+2, 4, 7, 9
+```
+
+최종 변경 파일은 다음과 같다.
+
+```text
+src/asp_final_bringup/launch/final_mission.launch.py
+src/asp_final_gazebo_bridge/asp_final_gazebo_bridge/final_pose_tf_broadcaster.py
+src/asp_final_perception/asp_final_perception/aruco_detector.py
+src/asp_final_perception/asp_final_perception/detected_marker_csv.py
+src/asp_final_perception/config/perception_params.yaml
+src/asp_final_perception/package.xml
+src/asp_final_perception/setup.py
+src/asp_final_uav/asp_final_uav/uav_mission_node.py
+src/asp_final_uav/package.xml
+src/asp_final_uav/path/mission2_uav_waypoints.csv
+```
+
+검증은 다음 명령으로 확인했다.
+
+```bash
+python3 -m py_compile \
+  src/asp_final_gazebo_bridge/asp_final_gazebo_bridge/final_pose_tf_broadcaster.py \
+  src/asp_final_perception/asp_final_perception/aruco_detector.py \
+  src/asp_final_perception/asp_final_perception/detected_marker_csv.py
+
+colcon build --packages-select \
+  asp_final_gazebo_bridge asp_final_perception asp_final_uav
+```

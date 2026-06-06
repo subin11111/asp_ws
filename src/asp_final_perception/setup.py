@@ -21,6 +21,7 @@ setup(
     entry_points={
         "console_scripts": [
             "aruco_detector = asp_final_perception.aruco_detector:main",
+            "detected_marker_csv = asp_final_perception.detected_marker_csv:main",
         ],
     },
 )

@@ -1,5 +1,4 @@
 import csv
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float32, Int32, String
 from tf2_ros import Buffer, TransformException, TransformListener
+from vision_msgs.msg import Detection3DArray
 
 
 @dataclass
@@ -131,7 +131,12 @@ class UavMissionNode(Node):
         self.create_subscription(Bool, "/asp_final/uav/mission2_start", self.on_mission2_start, 10)
         self.create_subscription(Bool, "/asp_final/landing/start", self.on_landing_start, 10)
         self.create_subscription(Int32, "/asp_final/perception/uav/marker_id", self.on_marker_id, 10)
-        self.create_subscription(String, "/asp_final/perception/landing/marker_detections", self.on_landing_detection, 10)
+        self.create_subscription(
+            Detection3DArray,
+            "/asp_final/perception/landing/marker_detections",
+            self.on_landing_detection,
+            10,
+        )
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -204,14 +209,10 @@ class UavMissionNode(Node):
     def on_landing_detection(self, msg):
         if self.phase != "landing":
             return
-        try:
-            data = json.loads(msg.data)
-            detection = self.select_landing_detection(data)
-            if detection:
-                self.last_landing_detection = detection
-                self.last_landing_detection_time = self.now()
-        except json.JSONDecodeError:
-            self.publish_text(self.landing_event_pub, "ignored_unparseable_landing_detection")
+        detection = self.select_landing_detection(msg)
+        if detection:
+            self.last_landing_detection = detection
+            self.last_landing_detection_time = self.now()
 
     def on_mission2_start(self, msg):
         if not msg.data or self.phase not in ("idle", "mission2_complete"):
@@ -364,21 +365,26 @@ class UavMissionNode(Node):
                     self.landing_complete_published = True
                     self.publish_text(self.landing_event_pub, "landing_complete")
 
-    def select_landing_detection(self, data):
-        detections = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    def select_landing_detection(self, msg):
         landing_marker_id = int(self.get_parameter("landing_marker_id").value)
-        for detection in detections:
-            if not isinstance(detection, dict):
+        for detection in msg.detections:
+            if not detection.results:
                 continue
-            marker_id = detection.get("marker_id", detection.get("id"))
+            result = detection.results[0]
             try:
-                marker_id = int(marker_id)
+                marker_id = int(result.hypothesis.class_id)
             except (TypeError, ValueError):
                 continue
             if landing_marker_id >= 0 and marker_id != landing_marker_id:
                 continue
-            detection["marker_id"] = marker_id
-            return detection
+            pose = result.pose.pose
+            return {
+                "marker_id": marker_id,
+                "map_x": pose.position.x,
+                "map_y": pose.position.y,
+                "map_z": pose.position.z,
+                "has_map": True,
+            }
         return None
 
     def current_ugv_landing_xy(self):

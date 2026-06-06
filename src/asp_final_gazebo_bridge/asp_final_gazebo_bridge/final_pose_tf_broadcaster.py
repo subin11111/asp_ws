@@ -1,8 +1,36 @@
+import math
+
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
+
+
+def quaternion_from_rpy(roll, pitch, yaw):
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def multiply_quaternion(lhs, rhs):
+    lx, ly, lz, lw = lhs.x, lhs.y, lhs.z, lhs.w
+    rx, ry, rz, rw = rhs
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
 
 
 class FinalPoseTfBroadcaster(Node):
@@ -24,6 +52,9 @@ class FinalPoseTfBroadcaster(Node):
         }
         self.last_transform = {"ugv": None, "uav": None}
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.camera_rdf_frame = "x500_gimbal_0/camera_link_rdf"
+        self.camera_frame = "x500_gimbal_0/camera_link"
+        self.camera_rdf_rotation = quaternion_from_rpy(-math.pi / 2.0, 0.0, math.pi / 2.0)
 
         qos = 10
         for topic in (
@@ -50,6 +81,7 @@ class FinalPoseTfBroadcaster(Node):
             for transform in msg.transforms:
                 normalized = self.normalized_transform(transform)
                 self.tf_broadcaster.sendTransform(normalized)
+                self.publish_camera_rdf(normalized)
                 if self.is_robot_transform(robot_key, normalized):
                     self.last_transform[robot_key] = normalized
                     self.publish_alias(robot_key, normalized)
@@ -86,6 +118,24 @@ class FinalPoseTfBroadcaster(Node):
         alias.child_frame_id = self.frames[robot_key]
         alias.transform = source.transform
         self.tf_broadcaster.sendTransform(alias)
+
+    def publish_camera_rdf(self, source):
+        if source.child_frame_id != self.camera_frame:
+            return
+
+        rdf = TransformStamped()
+        rdf.header = source.header
+        rdf.child_frame_id = self.camera_rdf_frame
+        rdf.transform.translation = source.transform.translation
+        qx, qy, qz, qw = multiply_quaternion(
+            source.transform.rotation,
+            self.camera_rdf_rotation,
+        )
+        rdf.transform.rotation.x = qx
+        rdf.transform.rotation.y = qy
+        rdf.transform.rotation.z = qz
+        rdf.transform.rotation.w = qw
+        self.tf_broadcaster.sendTransform(rdf)
 
 
 def main(args=None):
