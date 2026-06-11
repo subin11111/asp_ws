@@ -231,7 +231,7 @@ ros2 run tf2_ros tf2_echo map x500_gimbal_0/base_link
 ```
 
 ```bash
-cd /home/subin/ros2_ws
+cd /home/desktop1/ros2_ws
 python3 tools/path_tools/extract_marker_poses.py
 python3 tools/path_tools/generate_uav_path_from_markers.py \
   --input tools/path_tools/marker_poses.csv \

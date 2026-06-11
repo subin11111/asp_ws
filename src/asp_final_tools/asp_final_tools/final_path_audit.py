@@ -3,7 +3,7 @@ import math
 from pathlib import Path
 
 
-WORKSPACE = Path("/home/subin/ros2_ws")
+WORKSPACE = Path("/home/desktop1/ros2_ws")
 MISSION2_ORIGIN_ESTIMATE = {"x": -131.5354213347476, "y": 61.829714929681145, "z": 0.4}
 UAV_CONFIG = WORKSPACE / "src/asp_final_uav/config/uav_params.yaml"
 DEFAULT_PATHS = [

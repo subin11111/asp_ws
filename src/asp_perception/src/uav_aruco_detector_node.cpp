@@ -93,7 +93,7 @@ private:
     declare_parameter<int>("min_marker_id", 0);
     declare_parameter<int>("max_marker_id", 49);
     declare_parameter<std::string>(
-      "csv_path", "/home/subin/ros2_ws/mission_logs/uav_marker_detections.csv");
+      "csv_path", "/home/desktop1/ros2_ws/mission_logs/uav_marker_detections.csv");
     declare_parameter<double>("duplicate_suppression_distance_m", 0.5);
     declare_parameter<double>("duplicate_suppression_time_sec", 2.0);
   }

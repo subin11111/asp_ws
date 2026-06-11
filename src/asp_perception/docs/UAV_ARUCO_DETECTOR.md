@@ -23,7 +23,7 @@ UAV camera image에서 ArUco marker를 검출하고 marker ID, annotated image, 
 ## CSV log
 
 ```text
-/home/subin/ros2_ws/mission_logs/uav_marker_detections.csv
+/home/desktop1/ros2_ws/mission_logs/uav_marker_detections.csv
 ```
 
 형식:
