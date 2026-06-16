@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>asp_final_gazebo_bridge</name>
+  <version>0.1.0</version>
+  <description>Final ASP Gazebo bridge and command relay.</description>
+  <maintainer email="subin@example.com">subin</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
