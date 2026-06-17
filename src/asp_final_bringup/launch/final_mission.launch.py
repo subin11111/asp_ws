@@ -76,6 +76,11 @@ def generate_launch_description():
                 name="asp_final_visualization",
                 output="screen",
             ),
+            ExecuteProcess(
+                cmd=["bash", "-lc", "fuser -k 8088/tcp || true"],
+                name="asp_final_web_dashboard_port_cleanup",
+                output="screen",
+            ),
             Node(
                 package="asp_final_bringup",
                 executable="web_dashboard",
