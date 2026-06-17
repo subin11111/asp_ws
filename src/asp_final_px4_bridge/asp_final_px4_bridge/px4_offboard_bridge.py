@@ -409,7 +409,8 @@ class Px4OffboardBridge(Node):
             return
 
         if (
-            bool(self.get_parameter("auto_disarm_after_landed").value)
+            self.land_requested
+            and bool(self.get_parameter("auto_disarm_after_landed").value)
             and not self.disarm_after_land_sent
             and self.px4_armed()
             and self.landed_since_ns > 0
