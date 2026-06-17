@@ -34,25 +34,32 @@ asp_final_uav_mission_node:
     continue_on_marker_timeout: false
     marker_wait_timeout_sec: 8.0
     do_not_block_waypoint_progress_on_marker: true
+    mission2_complete_preposition_enabled: true
+    prelanding_altitude_m: 8.0
+    prelanding_gimbal_pitch_deg: -90.0
+    prelanding_target_lock_xy_tolerance_m: 2.0
     landing_hover_altitude_m: 4.0
     landing_descent_step_m: 3.4
     landing_complete_altitude_m: 0.02
     landing_timeout_s: 30.0
     landing_detection_timeout_s: 2.0
     landing_approach_altitude_m: 1.5
-    landing_touchdown_setpoint_m: 0.0
-    landing_touchdown_offset_m: 0.15
-    landing_land_command_height_tolerance_m: 0.06
+    landing_touchdown_setpoint_m: 0.10
+    landing_touchdown_offset_m: 0.25
+    landing_target_lock_altitude_m: 0.8
+    landing_land_command_height_tolerance_m: 0.10
     landing_touchdown_disarm_height_tolerance_m: 0.15
     landing_xy_tolerance_m: 1.0
     landing_land_command_xy_tolerance_m: 0.2
     landing_touchdown_disarm_xy_tolerance_m: 0.2
-    landing_land_command_stable_sec: 1.0
+    landing_land_command_stable_sec: 0.2
     landing_marker_loss_descent_xy_tolerance_m: 0.8
     landing_marker_id: 10
     landing_marker_max_ugv_distance_m: 2.0
     landing_final_descent_requires_marker: true
     landing_use_detection_pose_as_target: true
-    landing_send_px4_land_command: false
+    landing_detection_update_min_altitude_m: 2.0
+    landing_detection_update_max_step_m: 0.7
+    landing_send_px4_land_command: true
     landing_target_offset_body_x_m: 0.0
     landing_target_offset_body_y_m: 0.0

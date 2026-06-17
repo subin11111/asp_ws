@@ -13,9 +13,9 @@ asp_final_ugv_path_follower:
 
     # Mission1: UAV carrier mode
     mission1_carrier_mode: true
-    mission1_cruise_speed: 2.7
-    mission1_max_linear_speed: 2.7
-    mission1_min_linear_speed: 2.7
+    mission1_cruise_speed: 3.3
+    mission1_max_linear_speed: 3.3
+    mission1_min_linear_speed: 3.3
     mission1_max_angular_speed: 2.8
     mission1_max_linear_accel: 3.5
     mission1_max_angular_accel: 3.0

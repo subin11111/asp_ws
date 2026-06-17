@@ -2,6 +2,28 @@
 
 ## 최신 변경 사항
 
+### 2026-06-18: Prelanding target lock 및 착륙 drift 완화
+
+* Mission2 완료 직후 UAV가 landing start를 기다리는 동안 UGV landing marker 상공으로 미리 접근하도록 했다.
+  * `mission2_complete_preposition_enabled`를 활성화했다.
+  * prelanding 목표 고도는 `prelanding_altitude_m: 8.0` 기준으로 사용한다.
+  * prelanding 중 목표 XY가 2 m 이내로 가까워지면 target을 lock하여 계속 움직이는 TF를 과도하게 추종하지 않도록 했다.
+* 착륙 phase에서 prelanding target을 이어받도록 수정했다.
+  * landing start 시점에 target을 초기화하지 않고, 직전 prelanding target을 초기 landing target으로 사용한다.
+  * ArUco 검출 target은 고도 여유가 있을 때만 갱신한다.
+  * 검출 pose가 튀더라도 한 cycle에 최대 `0.7 m`만 landing target을 이동시켜 lateral drift를 줄인다.
+* Mission2 UAV 첫 번째 waypoint 고도를 `10 m`로 조정했다.
+  * marker roof scan 진입 시간을 줄이되, 이후 waypoint 고도는 기존 값을 유지한다.
+* Mission1 UGV carrier 속도 기본값을 `3.3 m/s`로 올렸다.
+  * `mission1_cruise_speed`, `mission1_max_linear_speed`, `mission1_min_linear_speed`: `3.3`
+  * 가속/각속도 제한은 기존 시험 튜닝값을 유지한다.
+* UAV marker CSV 저장 로직을 개선했다.
+  * 단순 마지막 검출값 대신, 각 marker waypoint에 가장 가까웠던 순간의 marker pose를 대표값으로 저장한다.
+  * CSV에 `best_seen_time_sec`, `best_wp_distance_m`, waypoint tag/좌표 필드를 추가했다.
+* 검증 기록
+  * `python3 -m py_compile src/asp_final_uav/asp_final_uav/uav_mission_node.py`
+  * `colcon build --packages-select asp_final_uav --symlink-install`
+
 ### 2026-06-18: Mission1 pre-roll 및 ArUco 중심 착륙 튜닝
 
 * Mission1 주행 중 UAV offboard setpoint pre-roll을 미리 수행하도록 추가했다.
