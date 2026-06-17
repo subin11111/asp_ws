@@ -41,8 +41,13 @@ asp_final_uav_mission_node:
     landing_approach_altitude_m: 3.0
     landing_touchdown_setpoint_m: 0.0
     landing_touchdown_offset_m: 0.15
-    landing_land_command_height_tolerance_m: 0.3
+    landing_land_command_height_tolerance_m: 0.05
     landing_xy_tolerance_m: 1.0
+    landing_land_command_xy_tolerance_m: 0.2
     landing_marker_id: 10
     landing_marker_max_ugv_distance_m: 2.0
     landing_final_descent_requires_marker: true
+    landing_use_detection_pose_as_target: false
+    landing_send_px4_land_command: false
+    landing_target_offset_body_x_m: -0.13
+    landing_target_offset_body_y_m: 0.14

@@ -22,6 +22,12 @@ asp_final_ugv_path_follower:
     mission1_lookahead_distance: 2.0
     mission1_waypoint_tolerance: 1.0
     mission1_slow_down_distance: 3.0
+    mission1_final_slowdown_enabled: true
+    mission1_final_slow_down_distance: 10.0
+    mission1_final_min_linear_speed: 0.8
+    mission1_final_respect_csv_target_speed: false
+    mission1_finish_decel_enabled: true
+    mission1_finish_decel_stop_threshold: 0.05
     mission1_heading_slowdown_enabled: true
     mission1_heading_slowdown_cos_threshold: 0.65
     mission1_corner_slowdown_enabled: true

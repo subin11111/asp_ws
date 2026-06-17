@@ -21,6 +21,7 @@
   <exec_depend>asp_final_ugv</exec_depend>
   <exec_depend>asp_final_uav</exec_depend>
   <exec_depend>asp_final_perception</exec_depend>
+  <exec_depend>gazebo_env_setup</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

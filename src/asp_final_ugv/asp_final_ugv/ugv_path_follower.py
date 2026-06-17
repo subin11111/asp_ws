@@ -61,6 +61,12 @@ class UgvPathFollower(Node):
                 ("mission1_lookahead_distance", 2.0),
                 ("mission1_waypoint_tolerance", 1.0),
                 ("mission1_slow_down_distance", 3.0),
+                ("mission1_final_slowdown_enabled", True),
+                ("mission1_final_slow_down_distance", 10.0),
+                ("mission1_final_min_linear_speed", 0.8),
+                ("mission1_final_respect_csv_target_speed", False),
+                ("mission1_finish_decel_enabled", True),
+                ("mission1_finish_decel_stop_threshold", 0.05),
                 ("mission1_heading_slowdown_enabled", True),
                 ("mission1_heading_slowdown_cos_threshold", 0.65),
                 ("mission1_corner_slowdown_enabled", True),
@@ -256,6 +262,12 @@ class UgvPathFollower(Node):
             self.publish_bool(self.rv_done_pub)
             self.publish_text(self.mission_event_pub, "rendezvous_reached")
 
+    def start_mission1_finish_decel(self):
+        self.mode = "mission1_decelerating"
+        self.active_mode = "MISSION1_DECELERATING"
+        self.publish_text(self.event_pub, "mission1_finish_decelerating")
+        self.publish_text(self.event_pub, f"UGV_MODE:{self.active_mode}")
+
     def curvature_at(self, path, index):
         if index <= 0 or index >= len(path) - 1:
             return 0.0
@@ -271,7 +283,7 @@ class UgvPathFollower(Node):
         return 2.0 * area2 / (d1 * d2 * d3)
 
     def profile_prefix(self):
-        return "mission1" if self.mode == "mission1" else "mission3"
+        return "mission1" if self.mode in ("mission1", "mission1_decelerating") else "mission3"
 
     def profile(self):
         prefix = self.profile_prefix()
@@ -321,6 +333,13 @@ class UgvPathFollower(Node):
 
     def tick(self):
         self.publish_text(self.state_pub, self.active_mode)
+        if self.mode == "mission1_decelerating":
+            self.cmd_pub.publish(self.limited_cmd(0.0, 0.0))
+            stop_threshold = float(self.get_parameter("mission1_finish_decel_stop_threshold").value)
+            if abs(self.prev_v) <= stop_threshold and abs(self.prev_w) <= stop_threshold:
+                self.mode = "mission1"
+                self.finish()
+            return
         if self.mode not in ("mission1", "rendezvous"):
             return
         if self.mode == "rendezvous" and self.rendezvous_delay_until is not None:
@@ -350,6 +369,14 @@ class UgvPathFollower(Node):
                 break
             self.index += 1
         if self.index >= len(path):
+            if (
+                self.mode == "mission1"
+                and bool(self.get_parameter("mission1_finish_decel_enabled").value)
+                and (abs(self.prev_v) > float(self.get_parameter("mission1_finish_decel_stop_threshold").value)
+                     or abs(self.prev_w) > float(self.get_parameter("mission1_finish_decel_stop_threshold").value))
+            ):
+                self.start_mission1_finish_decel()
+                return
             self.finish()
             return
 
@@ -359,8 +386,16 @@ class UgvPathFollower(Node):
         heading = math.atan2(ty - y, tx - x)
         heading_error = angle_wrap(heading - yaw)
         curvature = self.curvature_at(path, self.index)
+        mission1_final_slowdown = (
+            self.mode == "mission1"
+            and self.index == len(path) - 1
+            and bool(self.get_parameter("mission1_final_slowdown_enabled").value)
+        )
         target_speed = profile["cruise_speed"]
-        if target.target_speed is not None:
+        if target.target_speed is not None and not (
+            mission1_final_slowdown
+            and not bool(self.get_parameter("mission1_final_respect_csv_target_speed").value)
+        ):
             target_speed = min(target_speed, target.target_speed)
         target_speed /= 1.0 + float(self.get_parameter("curvature_gain").value) * curvature
         target_speed /= 1.0 + float(self.get_parameter("heading_slowdown_gain").value) * abs(heading_error)
@@ -369,6 +404,13 @@ class UgvPathFollower(Node):
         target_w = float(self.get_parameter("angular_kp").value) * heading_error
 
         if self.mode == "mission1":
+            if mission1_final_slowdown:
+                final_slow_down_distance = float(self.get_parameter("mission1_final_slow_down_distance").value)
+                final_min_speed = float(self.get_parameter("mission1_final_min_linear_speed").value)
+                if final_slow_down_distance > 1e-3:
+                    final_factor = clamp(dist / final_slow_down_distance, 0.0, 1.0)
+                    final_target_speed = final_min_speed + (profile["cruise_speed"] - final_min_speed) * final_factor
+                    target_speed = min(target_speed, final_target_speed)
             if bool(self.get_parameter("mission1_heading_slowdown_enabled").value):
                 heading_factor = max(0.0, math.cos(abs(heading_error)))
                 threshold = float(self.get_parameter("mission1_heading_slowdown_cos_threshold").value)
@@ -379,7 +421,10 @@ class UgvPathFollower(Node):
                 if angular_ratio > 0.65:
                     target_speed = min(target_speed, float(self.get_parameter("mission1_corner_slowdown_speed").value))
 
-        target_speed = clamp(target_speed, profile["min_linear_speed"], profile["max_linear_speed"])
+        min_linear_speed = profile["min_linear_speed"]
+        if mission1_final_slowdown:
+            min_linear_speed = min(min_linear_speed, float(self.get_parameter("mission1_final_min_linear_speed").value))
+        target_speed = clamp(target_speed, min_linear_speed, profile["max_linear_speed"])
         self.cmd_pub.publish(self.limited_cmd(target_speed, target_w))
 
 

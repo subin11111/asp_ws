@@ -76,5 +76,11 @@ def generate_launch_description():
                 name="asp_final_visualization",
                 output="screen",
             ),
+            Node(
+                package="gazebo_env_setup",
+                executable="mission_timer_node",
+                name="mission_timer_node",
+                output="screen",
+            ),
         ]
     )

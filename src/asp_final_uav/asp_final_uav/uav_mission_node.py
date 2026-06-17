@@ -84,11 +84,16 @@ class UavMissionNode(Node):
                 ("landing_approach_altitude_m", 3.0),
                 ("landing_touchdown_setpoint_m", 0.0),
                 ("landing_touchdown_offset_m", 0.15),
-                ("landing_land_command_height_tolerance_m", 0.3),
+                ("landing_land_command_height_tolerance_m", 0.05),
                 ("landing_xy_tolerance_m", 1.0),
+                ("landing_land_command_xy_tolerance_m", 0.2),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
                 ("landing_final_descent_requires_marker", True),
+                ("landing_use_detection_pose_as_target", False),
+                ("landing_send_px4_land_command", False),
+                ("landing_target_offset_body_x_m", -0.13),
+                ("landing_target_offset_body_y_m", 0.14),
             ],
         )
         self.map_frame = self.get_parameter("map_frame").value
@@ -106,6 +111,7 @@ class UavMissionNode(Node):
         self.last_wp_error_log = self.now()
         self.last_pose = None
         self.last_marker_id = None
+        self.last_marker_seen_time = None
         self.last_landing_detection = None
         self.last_landing_detection_time = None
         self.last_ugv_landing_xy = None
@@ -216,6 +222,7 @@ class UavMissionNode(Node):
 
     def on_marker_id(self, msg):
         self.last_marker_id = msg.data
+        self.last_marker_seen_time = self.now()
         self.publish_text(self.exploration_event_pub, f"MARKER_DETECTED:{msg.data}")
 
     def on_landing_detection(self, msg):
@@ -246,6 +253,8 @@ class UavMissionNode(Node):
         self.last_wp_error_log = self.now()
         self.waypoints = list(self.csv_waypoints)
         self.takeoff_origin = None
+        self.last_marker_id = None
+        self.last_marker_seen_time = None
         self.publish_text(self.exploration_event_pub, "mission2_started")
 
     def on_landing_start(self, msg):
@@ -326,7 +335,10 @@ class UavMissionNode(Node):
                 and bool(self.get_parameter("do_not_block_waypoint_progress_on_marker").value)
                 and self.elapsed(self.wp_started) > float(self.get_parameter("marker_wait_timeout_sec").value)
             )
-            if reached:
+            marker_detected = self.current_waypoint_marker_detected(wp)
+            if marker_detected:
+                self.advance_waypoint("marker_detected", wp, dxy, dz)
+            elif reached:
                 if wp.hold_sec > 0.0:
                     if self.wp_hold_started is None:
                         self.wp_hold_started = self.now()
@@ -355,13 +367,13 @@ class UavMissionNode(Node):
                 self.landing_target_xy = (x, y)
             marker_usable = ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy)
             target_surface_z = ugv_pose[2] if ugv_pose is not None else z
-            if marker_usable:
+            if marker_usable and bool(self.get_parameter("landing_use_detection_pose_as_target").value):
                 self.landing_target_xy = (
                     float(self.last_landing_detection["map_x"]),
                     float(self.last_landing_detection["map_y"]),
                 )
                 target_surface_z = float(self.last_landing_detection["map_z"])
-            target_x, target_y = self.landing_target_xy
+            target_x, target_y = self.apply_landing_target_offset(*self.landing_target_xy, landing_yaw)
             xy_error = math.hypot(target_x - x, target_y - y)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
             approach_alt = target_surface_z + float(self.get_parameter("landing_approach_altitude_m").value)
@@ -374,23 +386,24 @@ class UavMissionNode(Node):
             if self.landing_land_started is not None:
                 target_z = target_surface_z + float(self.get_parameter("landing_touchdown_setpoint_m").value)
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
-            self.log_landing_status(xy_error, z, target_z, marker_usable, target_surface_z)
+            self.log_landing_status(xy_error, x, y, target_x, target_y, z, target_z, marker_usable, target_surface_z)
             ready_to_land = (
                 z <= touchdown_alt + float(self.get_parameter("landing_land_command_height_tolerance_m").value)
-                and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                and xy_error <= float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
                 and marker_gate_open
             )
             timed_out_on_target = (
                 self.elapsed(self.landing_started) > float(self.get_parameter("landing_timeout_s").value)
                 and ugv_xy is not None
-                and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                and xy_error <= float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
                 and marker_gate_open
             )
             if ready_to_land or timed_out_on_target:
                 if self.landing_land_started is None:
                     self.landing_land_started = self.now()
                     self.publish_text(self.landing_event_pub, "landing_land_command_started")
-                self.publish_bool(self.land_pub)
+                if bool(self.get_parameter("landing_send_px4_land_command").value):
+                    self.publish_bool(self.land_pub)
                 if self.vehicle_landed and not self.landing_complete_published:
                     self.publish_bool(self.landing_complete_pub)
                     self.landing_complete_published = True
@@ -466,13 +479,26 @@ class UavMissionNode(Node):
         max_distance = float(self.get_parameter("landing_marker_max_ugv_distance_m").value)
         return math.hypot(marker_xy[0] - ugv_xy[0], marker_xy[1] - ugv_xy[1]) <= max_distance
 
-    def log_landing_status(self, xy_error, current_z, target_z, marker_usable, target_surface_z):
+    def apply_landing_target_offset(self, x, y, yaw):
+        offset_x = float(self.get_parameter("landing_target_offset_body_x_m").value)
+        offset_y = float(self.get_parameter("landing_target_offset_body_y_m").value)
+        if abs(offset_x) < 1e-6 and abs(offset_y) < 1e-6:
+            return x, y
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        return (
+            x + cos_yaw * offset_x - sin_yaw * offset_y,
+            y + sin_yaw * offset_x + cos_yaw * offset_y,
+        )
+
+    def log_landing_status(self, xy_error, current_x, current_y, target_x, target_y, current_z, target_z, marker_usable, target_surface_z):
         if self.elapsed(self.last_landing_status_log) < 1.0:
             return
         self.last_landing_status_log = self.now()
         self.get_logger().info(
             "LANDING_STATUS "
-            f"xy_error={xy_error:.2f} current_z={current_z:.2f} target_z={target_z:.2f} "
+            f"xy_error={xy_error:.2f} current=({current_x:.2f},{current_y:.2f},{current_z:.2f}) "
+            f"target=({target_x:.2f},{target_y:.2f},{target_z:.2f}) "
             f"surface_z={target_surface_z:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
         )
 
@@ -565,12 +591,31 @@ class UavMissionNode(Node):
             event = f"WAYPOINT_STUCK_SKIP:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         elif reason == "marker_timeout_continue":
             event = f"MARKER_TIMEOUT_CONTINUE:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
+        elif reason == "marker_detected":
+            event = f"MARKER_DETECTED_ADVANCE:{waypoint.tag}:marker={self.last_marker_id}:dxy={dxy:.2f}:dz={dz:.2f}"
         else:
             event = f"WAYPOINT_TIMEOUT_SKIP:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         self.publish_text(self.exploration_event_pub, event)
         self.publish_text(self.exploration_event_pub, f"waypoint_{self.index}_{reason}")
         self.index += 1
         self.start_current_waypoint()
+
+    def expected_marker_id(self, waypoint):
+        parts = waypoint.tag.split("_")
+        if len(parts) >= 2 and parts[0] == "marker":
+            try:
+                return int(parts[1])
+            except ValueError:
+                return None
+        return None
+
+    def current_waypoint_marker_detected(self, waypoint):
+        if waypoint.marker_budget <= 0 or self.last_marker_id is None or self.last_marker_seen_time is None:
+            return False
+        if self.last_marker_seen_time.nanoseconds < self.wp_started.nanoseconds:
+            return False
+        expected_id = self.expected_marker_id(waypoint)
+        return expected_id is None or int(self.last_marker_id) == expected_id
 
 
 def main(args=None):
