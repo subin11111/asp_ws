@@ -16,6 +16,7 @@ def generate_launch_description():
     uav_params = share("asp_final_uav") / "config" / "uav_params.yaml"
     perception_params = share("asp_final_perception") / "config" / "perception_params.yaml"
     gazebo_bridge_launch = share("asp_final_gazebo_bridge") / "launch" / "gazebo_bridge.launch.py"
+    detected_marker_csv_path = "/home/sunny/asp_ws/docs/asp_final_detected_markers.csv"
     rendezvous_goal_x = LaunchConfiguration("rendezvous_goal_x")
     rendezvous_goal_y = LaunchConfiguration("rendezvous_goal_y")
     rendezvous_goal_target_speed = LaunchConfiguration("rendezvous_goal_target_speed")
@@ -88,6 +89,7 @@ def generate_launch_description():
                 package="asp_final_perception",
                 executable="detected_marker_csv",
                 name="asp_final_detected_marker_csv",
+                parameters=[{"csv_path": detected_marker_csv_path}],
                 output="screen",
             ),
             Node(

@@ -41,7 +41,7 @@ class DetectedMarkerCsv(Node):
             "",
             [
                 ("marker_detections_topic", "/asp_final/perception/uav/marker_detections"),
-                ("csv_path", "/home/desktop1/ros2_ws/mission_logs/asp_final_detected_markers.csv"),
+                ("csv_path", "/home/sunny/asp_ws/docs/asp_final_detected_markers.csv"),
                 ("allowed_marker_ids", "0,1,2,3,4,5,6,7,8,9"),
             ],
         )

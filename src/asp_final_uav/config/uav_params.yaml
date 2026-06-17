@@ -48,9 +48,9 @@ asp_final_uav_mission_node:
     landing_gimbal_pitch_deg: -90.0
     landing_pre_approach_altitude_m: 2.5
     landing_approach_altitude_m: 0.8
-    landing_align_hold_sec: 0.3
+    landing_align_hold_sec: 0.5
     landing_touchdown_setpoint_m: -0.2
-    landing_xy_tolerance_m: 0.2
+    landing_xy_tolerance_m: 0.16
     landing_yaw_tolerance_deg: 10.0
     landing_use_marker_yaw: false
     landing_marker_yaw_max_error_deg: 25.0
