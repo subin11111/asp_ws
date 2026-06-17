@@ -5,6 +5,9 @@ asp_final_uav_mission_node:
     base_frame: x500_gimbal_0/base_link
     ugv_base_frame: X1_asp/base_link
     ugv_landing_frame: X1_asp/aruco_marker_10_link
+    rendezvous_path: mission3_rendezvous.csv
+    rendezvous_goal_x: .nan
+    rendezvous_goal_y: .nan
     control_period_s: 0.2
     takeoff_altitude_m: 10.0
     waypoint_tolerance_m: 1.2
@@ -34,12 +37,17 @@ asp_final_uav_mission_node:
     marker_wait_timeout_sec: 8.0
     do_not_block_waypoint_progress_on_marker: true
     landing_hover_altitude_m: 4.0
-    landing_descent_step_m: 1.0
+    landing_descent_step_m: 0.3
     landing_complete_altitude_m: 0.02
     landing_timeout_s: 30.0
-    landing_detection_timeout_s: 2.0
-    landing_approach_altitude_m: 3.0
+    landing_detection_timeout_s: 5.0
+    landing_gimbal_pitch_deg: -90.0
+    landing_pre_approach_altitude_m: 2.5
+    landing_approach_altitude_m: 1.5
+    landing_align_hold_sec: 2.5
     landing_touchdown_setpoint_m: 0.0
     landing_xy_tolerance_m: 1.0
     landing_marker_id: 10
-    landing_marker_max_ugv_distance_m: 2.0
+    landing_marker_max_ugv_distance_m: 4.0
+    landing_target_update_max_jump_m: 0.5
+    landing_freeze_target_after_align: true

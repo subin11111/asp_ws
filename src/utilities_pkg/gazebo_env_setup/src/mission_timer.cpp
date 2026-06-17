@@ -1,4 +1,12 @@
 // mission_timer_node.cpp
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <optional>
+#include <sstream>
+
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <tf2_ros/buffer.h>
@@ -13,6 +21,7 @@ public:
     world_frame_("map"),
     robot_frame_("X1_asp"),
     gimbal_frame_("x500_gimbal_0"),
+    csv_path_(defaultCsvPath()),
     start_threshold_(0.1),     // [m]
     stop_threshold_(1.0)       // [m]
   {
@@ -32,6 +41,7 @@ public:
       std::bind(&MissionTimerNode::timerCb, this));
 
     RCLCPP_INFO(get_logger(), "MissionTimerNode ready");
+    RCLCPP_INFO(get_logger(), "Mission timer CSV path: %s", csv_path_.c_str());
   }
 
 private:
@@ -65,6 +75,7 @@ private:
         start_time_ = this->now();
         RCLCPP_INFO(get_logger(),
           "📍 Mission started (%.2f m from origin)", dist);
+        appendCsvRow("start", dist, std::nullopt);
       }
     }
   }
@@ -97,10 +108,62 @@ private:
 
       RCLCPP_INFO(get_logger(),
         "✅ Mission finished (dist=%.2f m). Total time: %.2f s", dist, elapsed);
+      appendCsvRow("finish", dist, elapsed);
     }
   }
 
   // ── 유틸 ───────────────────────────────────────────────────
+  static std::string defaultCsvPath()
+  {
+    const char * home = std::getenv("HOME");
+    const std::string base = home ? home : "/tmp";
+    return base + "/asp_ws/mission_logs/mission_timer_runs.csv";
+  }
+
+  static std::string isoTimestamp(const std::chrono::system_clock::time_point & tp)
+  {
+    const std::time_t raw = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &raw);
+#else
+    localtime_r(&raw, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    return oss.str();
+  }
+
+  void ensureCsvHeader()
+  {
+    std::filesystem::path path(csv_path_);
+    std::filesystem::create_directories(path.parent_path());
+    if (std::filesystem::exists(path)) {
+      return;
+    }
+
+    std::ofstream out(path);
+    out << "recorded_at,event,distance_m,elapsed_sec\n";
+  }
+
+  void appendCsvRow(const std::string & event, double distance_m, const std::optional<double> & elapsed_sec)
+  {
+    ensureCsvHeader();
+    std::ofstream out(csv_path_, std::ios::app);
+    if (!out.is_open()) {
+      RCLCPP_WARN(get_logger(), "Failed to open mission timer CSV: %s", csv_path_.c_str());
+      return;
+    }
+
+    out << isoTimestamp(std::chrono::system_clock::now()) << ','
+        << event << ','
+        << std::fixed << std::setprecision(2) << distance_m << ',';
+    if (elapsed_sec.has_value()) {
+      out << std::fixed << std::setprecision(2) << *elapsed_sec;
+    }
+    out << '\n';
+  }
+
   static double euclid(double x1,double y1,double z1,
                        double x2,double y2,double z2)
   {
@@ -109,6 +172,7 @@ private:
 
   // ── 멤버 변수 ──────────────────────────────────────────────
   std::string world_frame_, robot_frame_, gimbal_frame_;
+  std::string csv_path_;
   double start_threshold_, stop_threshold_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -124,7 +188,6 @@ private:
   // 좌표 & 시간
   double init_x_, init_y_, init_z_;
   rclcpp::Time start_time_;
-
 };
 
 int main(int argc, char ** argv)

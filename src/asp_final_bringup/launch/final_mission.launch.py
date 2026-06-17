@@ -82,5 +82,11 @@ def generate_launch_description():
                 name="mission_timer_node",
                 output="screen",
             ),
+            Node(
+                package="asp_final_tools",
+                executable="mission_timer_csv_logger",
+                name="asp_final_mission_timer_csv_logger",
+                output="screen",
+            ),
         ]
     )

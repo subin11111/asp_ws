@@ -124,13 +124,13 @@ class FinalPoseTfBroadcaster(Node):
             return
 
         rdf = TransformStamped()
-        rdf.header = source.header
+        rdf.header.stamp = self.get_clock().now().to_msg()
+        rdf.header.frame_id = self.camera_frame
         rdf.child_frame_id = self.camera_rdf_frame
-        rdf.transform.translation = source.transform.translation
-        qx, qy, qz, qw = multiply_quaternion(
-            source.transform.rotation,
-            self.camera_rdf_rotation,
-        )
+        rdf.transform.translation.x = 0.0
+        rdf.transform.translation.y = 0.0
+        rdf.transform.translation.z = 0.0
+        qx, qy, qz, qw = self.camera_rdf_rotation
         rdf.transform.rotation.x = qx
         rdf.transform.rotation.y = qy
         rdf.transform.rotation.z = qz

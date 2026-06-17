@@ -22,6 +22,7 @@ setup(
         "console_scripts": [
             "path_audit = asp_final_tools.path_audit:main",
             "final_path_audit = asp_final_tools.final_path_audit:main",
+            "mission_timer_csv_logger = asp_final_tools.mission_timer_csv_logger:main",
         ],
     },
 )

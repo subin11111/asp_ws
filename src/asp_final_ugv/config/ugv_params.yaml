@@ -13,8 +13,8 @@ asp_final_ugv_path_follower:
 
     # Mission1: UAV carrier mode
     mission1_carrier_mode: true
-    mission1_cruise_speed: 1.0
-    mission1_max_linear_speed: 1.8
+    mission1_cruise_speed: 2.2
+    mission1_max_linear_speed: 2.2
     mission1_min_linear_speed: 1.8
     mission1_max_angular_speed: 1.8
     mission1_max_linear_accel: 1.8
@@ -41,7 +41,7 @@ asp_final_ugv_path_follower:
     mission3_lookahead_distance: 3.5
     mission3_waypoint_tolerance: 1.2
     mission3_slow_down_distance: 2.0
-    mission3_start_delay_sec: 3.0
+    mission3_start_delay_sec: 4.0
     rendezvous_goal_x: .nan
     rendezvous_goal_y: .nan
     rendezvous_goal_target_speed: .nan

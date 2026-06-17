@@ -1,5 +1,6 @@
 import csv
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,9 @@ class UavMissionNode(Node):
                 ("base_frame", "x500_gimbal_0/base_link"),
                 ("ugv_base_frame", "X1_asp/base_link"),
                 ("ugv_landing_frame", "X1_asp/aruco_marker_10_link"),
+                ("rendezvous_path", "mission3_rendezvous.csv"),
+                ("rendezvous_goal_x", float("nan")),
+                ("rendezvous_goal_y", float("nan")),
                 ("control_period_s", 0.2),
                 ("takeoff_altitude_m", 24.0),
                 ("waypoint_tolerance_m", 1.2),
@@ -80,11 +84,16 @@ class UavMissionNode(Node):
                 ("landing_complete_altitude_m", 0.0),
                 ("landing_timeout_s", 30.0),
                 ("landing_detection_timeout_s", 2.0),
+                ("landing_gimbal_pitch_deg", -90.0),
+                ("landing_pre_approach_altitude_m", 2.0),
                 ("landing_approach_altitude_m", 3.0),
+                ("landing_align_hold_sec", 2.0),
                 ("landing_touchdown_setpoint_m", 0.0),
                 ("landing_xy_tolerance_m", 1.0),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
+                ("landing_target_update_max_jump_m", 0.5),
+                ("landing_freeze_target_after_align", True),
             ],
         )
         self.map_frame = self.get_parameter("map_frame").value
@@ -102,13 +111,17 @@ class UavMissionNode(Node):
         self.last_wp_error_log = self.now()
         self.last_pose = None
         self.last_marker_id = None
+        self.detected_marker_ids = set()
         self.last_landing_detection = None
         self.last_landing_detection_time = None
         self.last_ugv_landing_xy = None
         self.takeoff_origin = None
         self.landing_target_xy = None
+        self.rendezvous_goal_xy = self.load_rendezvous_goal()
+        self.landing_stage = "idle"
         self.landing_started = self.now()
         self.landing_land_started = None
+        self.landing_align_started = None
         self.landing_complete_published = False
 
         self.cmd_pose_pub = self.create_publisher(PoseStamped, "/asp_final/uav/cmd_pose", 10)
@@ -193,6 +206,27 @@ class UavMissionNode(Node):
         msg.data = float(pitch)
         self.gimbal_pub.publish(msg)
 
+    def load_rendezvous_goal(self):
+        goal_x = float(self.get_parameter("rendezvous_goal_x").value)
+        goal_y = float(self.get_parameter("rendezvous_goal_y").value)
+        if math.isfinite(goal_x) and math.isfinite(goal_y):
+            return goal_x, goal_y
+
+        file_name = str(self.get_parameter("rendezvous_path").value)
+        path = Path(file_name)
+        if not path.is_absolute():
+            path = Path(get_package_share_directory("asp_final_ugv")) / "path" / file_name
+
+        last_row = None
+        with path.open(newline="") as handle:
+            for row in csv.reader(handle):
+                if not row or row[0].strip().startswith("#"):
+                    continue
+                last_row = row
+        if last_row is None:
+            raise RuntimeError(f"No rendezvous waypoint in {path}")
+        return float(last_row[0]), float(last_row[1])
+
     def current_pose(self):
         transform = self.tf_buffer.lookup_transform(self.map_frame, self.base_frame, rclpy.time.Time())
         pos = transform.transform.translation
@@ -204,6 +238,7 @@ class UavMissionNode(Node):
 
     def on_marker_id(self, msg):
         self.last_marker_id = msg.data
+        self.detected_marker_ids.add(int(msg.data))
         self.publish_text(self.exploration_event_pub, f"MARKER_DETECTED:{msg.data}")
 
     def on_landing_detection(self, msg):
@@ -213,6 +248,11 @@ class UavMissionNode(Node):
         if detection:
             self.last_landing_detection = detection
             self.last_landing_detection_time = self.now()
+            self.get_logger().info(
+                f"LANDING_DETECTION marker={detection['marker_id']} "
+                f"map_x={detection['map_x']:.2f} map_y={detection['map_y']:.2f}",
+                throttle_duration_sec=1.0,
+            )
 
     def on_mission2_start(self, msg):
         if not msg.data or self.phase not in ("idle", "mission2_complete"):
@@ -226,6 +266,7 @@ class UavMissionNode(Node):
         self.last_wp_error_log = self.now()
         self.waypoints = list(self.csv_waypoints)
         self.takeoff_origin = None
+        self.detected_marker_ids.clear()
         self.publish_text(self.exploration_event_pub, "mission2_started")
 
     def on_landing_start(self, msg):
@@ -233,13 +274,20 @@ class UavMissionNode(Node):
             return
         self.phase = "landing"
         self.landing_started = self.now()
-        self.landing_target_xy = None
+        self.rendezvous_goal_xy = self.load_rendezvous_goal()
+        self.landing_target_xy = self.rendezvous_goal_xy
+        self.landing_stage = "pre_approach"
         self.last_landing_detection = None
         self.last_landing_detection_time = None
         self.last_ugv_landing_xy = None
         self.landing_land_started = None
+        self.landing_align_started = None
         self.landing_complete_published = False
         self.publish_text(self.landing_event_pub, "landing_started")
+        self.publish_text(
+            self.landing_event_pub,
+            f"landing_pre_approach_started:x={self.rendezvous_goal_xy[0]:.2f}:y={self.rendezvous_goal_xy[1]:.2f}",
+        )
 
     def tick(self):
         self.publish_text(self.exploration_state_pub, self.phase)
@@ -281,10 +329,17 @@ class UavMissionNode(Node):
                 self.publish_text(self.exploration_event_pub, "mission2_complete")
                 return
             wp = self.waypoints[self.index]
+            expected_marker_id = self.expected_marker_id(wp)
+            if expected_marker_id is not None and expected_marker_id in self.detected_marker_ids:
+                self.advance_waypoint("marker_already_detected", wp, 0.0, 0.0)
+                return
             self.cmd_pose_pub.publish(self.pose_msg(wp.x, wp.y, wp.z, wp.yaw))
             self.publish_gimbal(wp.gimbal_pitch_deg)
             dx, dy, dz, dxy, d3 = self.compute_waypoint_error((x, y, z), wp)
             self.log_waypoint_error(wp, dxy, dz, d3)
+            if expected_marker_id is not None and expected_marker_id in self.detected_marker_ids:
+                self.advance_waypoint("marker_detected", wp, dxy, dz)
+                return
             reached = self.waypoint_reached(wp, dxy, dz, d3)
             timed_out = self.elapsed(self.wp_started) > float(self.get_parameter("waypoint_timeout_s").value)
             stuck = (
@@ -324,36 +379,99 @@ class UavMissionNode(Node):
 
         if self.phase == "landing":
             self.publish_text(self.landing_state_pub, "landing")
+            self.publish_gimbal(float(self.get_parameter("landing_gimbal_pitch_deg").value))
             ugv_pose = self.current_ugv_landing_pose()
             ugv_xy = (ugv_pose[0], ugv_pose[1]) if ugv_pose is not None else None
             landing_yaw = ugv_pose[2] if ugv_pose is not None else yaw
-            if ugv_xy is not None:
-                self.landing_target_xy = ugv_xy
-            elif self.landing_target_xy is None:
-                self.landing_target_xy = (x, y)
-            if ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
-                self.landing_target_xy = (
-                    float(self.last_landing_detection["map_x"]),
-                    float(self.last_landing_detection["map_y"]),
-                )
-            target_x, target_y = self.landing_target_xy
-            xy_error = math.hypot(target_x - x, target_y - y)
+            pre_approach_alt = float(self.get_parameter("landing_pre_approach_altitude_m").value)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
             complete_alt = float(self.get_parameter("landing_complete_altitude_m").value)
+            approach_alt = float(self.get_parameter("landing_approach_altitude_m").value)
+            xy_tolerance = float(self.get_parameter("landing_xy_tolerance_m").value)
+            align_hold_sec = float(self.get_parameter("landing_align_hold_sec").value)
+            if self.landing_target_xy is None:
+                self.landing_target_xy = self.rendezvous_goal_xy
+            target_x, target_y = self.landing_target_xy
+            xy_error = math.hypot(target_x - x, target_y - y)
+
+            if self.landing_stage == "pre_approach":
+                target_z = pre_approach_alt
+                self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
+                z_error = abs(z - target_z)
+                if xy_error <= xy_tolerance and z_error <= max(0.3, descent_step):
+                    self.landing_stage = "marker_search"
+                    self.publish_text(self.landing_event_pub, "landing_pre_approach_complete")
+                    self.publish_text(self.landing_event_pub, "landing_marker_search_started")
+                return
+
+            if self.landing_stage == "marker_search":
+                target_z = pre_approach_alt
+                self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
+                if ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
+                    self.landing_target_xy = self.landing_detection_xy()
+                    self.landing_stage = "descend"
+                    self.landing_align_started = None
+                    self.get_logger().info(
+                        f"LANDING_MARKER_LOCK target_x={self.landing_target_xy[0]:.2f} "
+                        f"target_y={self.landing_target_xy[1]:.2f}"
+                    )
+                    self.publish_text(
+                        self.landing_event_pub,
+                        f"landing_marker_lock_acquired:x={self.landing_target_xy[0]:.2f}:y={self.landing_target_xy[1]:.2f}",
+                    )
+                return
+
+            freeze_after_align = bool(self.get_parameter("landing_freeze_target_after_align").value)
+            allow_target_updates = self.landing_land_started is None and not (
+                freeze_after_align and self.landing_align_started is not None
+            )
+            if allow_target_updates and ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
+                detection_xy = self.landing_detection_xy()
+                jump_limit = float(self.get_parameter("landing_target_update_max_jump_m").value)
+                jump_distance = math.hypot(
+                    detection_xy[0] - self.landing_target_xy[0],
+                    detection_xy[1] - self.landing_target_xy[1],
+                )
+                if jump_limit <= 0.0 or jump_distance <= jump_limit:
+                    self.landing_target_xy = detection_xy
+                    target_x, target_y = self.landing_target_xy
+                    xy_error = math.hypot(target_x - x, target_y - y)
+                    self.get_logger().info(
+                        f"LANDING_TARGET_UPDATE target_x={target_x:.2f} target_y={target_y:.2f} xy_error={xy_error:.2f}",
+                        throttle_duration_sec=1.0,
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"LANDING_TARGET_JUMP_REJECTED jump={jump_distance:.2f} "
+                        f"candidate_x={detection_xy[0]:.2f} candidate_y={detection_xy[1]:.2f}",
+                        throttle_duration_sec=1.0,
+                    )
+            at_approach_alt = z <= approach_alt + max(0.1, descent_step * 0.5)
+
             target_z = max(complete_alt, z - descent_step)
-            if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value):
-                target_z = max(float(self.get_parameter("landing_approach_altitude_m").value), z - descent_step)
             if self.landing_land_started is not None:
                 target_z = float(self.get_parameter("landing_touchdown_setpoint_m").value)
+            elif xy_error > xy_tolerance:
+                target_z = max(approach_alt, z - descent_step)
+                self.landing_align_started = None
+            elif not at_approach_alt:
+                target_z = max(approach_alt, z - descent_step)
+                self.landing_align_started = None
+            else:
+                target_z = approach_alt
+                if self.landing_align_started is None:
+                    self.landing_align_started = self.now()
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
             ready_to_land = (
-                z <= complete_alt
-                and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                self.landing_align_started is not None
+                and self.elapsed(self.landing_align_started) >= align_hold_sec
+                and xy_error <= xy_tolerance
+                and at_approach_alt
             )
             timed_out_on_target = (
                 self.elapsed(self.landing_started) > float(self.get_parameter("landing_timeout_s").value)
-                and ugv_xy is not None
-                and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                and xy_error <= xy_tolerance
+                and self.landing_stage == "descend"
             )
             if ready_to_land or timed_out_on_target:
                 if self.landing_land_started is None:
@@ -435,6 +553,12 @@ class UavMissionNode(Node):
         max_distance = float(self.get_parameter("landing_marker_max_ugv_distance_m").value)
         return math.hypot(marker_xy[0] - ugv_xy[0], marker_xy[1] - ugv_xy[1]) <= max_distance
 
+    def landing_detection_xy(self):
+        return (
+            float(self.last_landing_detection["map_x"]),
+            float(self.last_landing_detection["map_y"]),
+        )
+
     def build_mission2_runtime_waypoints(self, start_x, start_y, start_z):
         if not self.csv_waypoints or not bool(self.get_parameter("enable_mission2_transition_corridor").value):
             return list(self.csv_waypoints)
@@ -464,6 +588,16 @@ class UavMissionNode(Node):
         return transition + list(self.csv_waypoints)
 
     def start_current_waypoint(self):
+        while self.index < len(self.waypoints):
+            waypoint = self.waypoints[self.index]
+            expected_marker_id = self.expected_marker_id(waypoint)
+            if expected_marker_id is None or expected_marker_id not in self.detected_marker_ids:
+                break
+            self.publish_text(
+                self.exploration_event_pub,
+                f"WAYPOINT_SKIPPED_ALREADY_DETECTED:{waypoint.tag}:marker={expected_marker_id}",
+            )
+            self.index += 1
         self.wp_started = self.now()
         self.wp_hold_started = None
         self.xy_close_started = None
@@ -493,6 +627,12 @@ class UavMissionNode(Node):
             xy_tol, z_tol = self.waypoint_tolerances(waypoint)
             return dxy <= xy_tol and abs(dz) <= z_tol
         return d3 <= float(self.get_parameter("waypoint_tolerance_m").value)
+
+    def expected_marker_id(self, waypoint):
+        match = re.search(r"marker_(\d+)", waypoint.tag)
+        if not match:
+            return None
+        return int(match.group(1))
 
     def xy_close_force_advance(self, waypoint, dxy, dz):
         if not bool(self.get_parameter("force_advance_when_xy_close").value):
@@ -524,6 +664,12 @@ class UavMissionNode(Node):
             event = f"WAYPOINT_STUCK_SKIP:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         elif reason == "marker_timeout_continue":
             event = f"MARKER_TIMEOUT_CONTINUE:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
+        elif reason == "marker_detected":
+            marker_id = self.expected_marker_id(waypoint)
+            event = f"WAYPOINT_MARKER_DETECTED_ADVANCE:{waypoint.tag}:marker={marker_id}:dxy={dxy:.2f}:dz={dz:.2f}"
+        elif reason == "marker_already_detected":
+            marker_id = self.expected_marker_id(waypoint)
+            event = f"WAYPOINT_MARKER_ALREADY_DETECTED_SKIP:{waypoint.tag}:marker={marker_id}"
         else:
             event = f"WAYPOINT_TIMEOUT_SKIP:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         self.publish_text(self.exploration_event_pub, event)
