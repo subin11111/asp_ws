@@ -77,6 +77,13 @@ def generate_launch_description():
                 output="screen",
             ),
             Node(
+                package="asp_final_bringup",
+                executable="web_dashboard",
+                name="asp_final_web_dashboard",
+                arguments=["--host", "127.0.0.1", "--port", "8088"],
+                output="screen",
+            ),
+            Node(
                 package="gazebo_env_setup",
                 executable="mission_timer_node",
                 name="mission_timer_node",

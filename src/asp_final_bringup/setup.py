@@ -12,6 +12,7 @@ setup(
         (f"share/{package_name}", ["package.xml"]),
         (f"share/{package_name}/launch", glob("launch/*.launch.py")),
         (f"share/{package_name}/config", glob("config/*")),
+        (f"share/{package_name}/web", glob("web/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -22,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "final_visualization = asp_final_bringup.final_visualization:main",
+            "web_dashboard = asp_final_bringup.web_dashboard:main",
         ],
     },
 )
