@@ -2,6 +2,34 @@
 
 ## 최신 변경 사항
 
+### 2026-06-18: Mission1 pre-roll 및 ArUco 중심 착륙 튜닝
+
+* Mission1 주행 중 UAV offboard setpoint pre-roll을 미리 수행하도록 추가했다.
+  * `/asp_final/mission/state == MISSION1_CARRIER` 동안 UAV 현재 pose를 `/asp_final/uav/cmd_pose`로 계속 발행한다.
+  * PX4 bridge는 setpoint counter와 map/PX4 anchor를 미리 준비한다.
+  * `/asp_final/uav/offboard_command_enable`이 true가 되기 전에는 OFFBOARD/ARM 요청을 막아 Mission1 중 의도치 않은 이륙을 방지한다.
+  * Mission2 시작 시 command gate를 열어 pre-roll 이후 바로 OFFBOARD/ARM 요청이 가능하도록 했다.
+* 착륙 완료 전 조기 disarm 문제를 줄이기 위해 PX4 bridge의 일반 `vehicle_land_detected.landed=true` 기반 자동 disarm 경로를 제거했다.
+  * `/asp_final/uav/land`가 요청된 landing phase에서만 disarm 후 `/command/disarm`을 발행하도록 제한했다.
+  * `mission_timer_node`는 수정하지 않고, 타이머 종료 조건에 맞는 disarm 타이밍만 bridge에서 보정했다.
+* UAV precision landing을 ArUco marker 10 검출 중심 기준으로 변경했다.
+  * `landing_use_detection_pose_as_target`을 활성화하고 고정 landing offset을 `0.0`으로 변경했다.
+  * marker 검출 pose가 유효하면 해당 map 좌표를 landing target으로 latch한다.
+  * marker 검출이 잠깐 끊기면 마지막 검출 target을 유지하고, 검출 전에는 UGV marker TF를 fallback으로 사용한다.
+* 착륙 속도와 안정 조건을 튜닝했다.
+  * `landing_descent_step_m`을 `3.4`로 높여 최종 하강을 빠르게 했다.
+  * LAND 명령은 XY 오차 `0.20 m` 이내가 안정적으로 유지될 때 발행한다.
+  * marker loss 상태에서도 target 근처/접근 고도 이하에서는 하강을 이어갈 수 있게 했다.
+* Mission1 UGV carrier 속도 기본값을 시험 튜닝값으로 올렸다.
+  * `mission1_cruise_speed`, `mission1_max_linear_speed`, `mission1_min_linear_speed`: `2.7`
+  * `mission1_max_linear_accel`: `3.5`
+  * `mission1_max_angular_speed`: `2.8`
+  * `mission1_max_angular_accel`: `3.0`
+* 검증 기록
+  * `colcon build --packages-select asp_final_uav asp_final_px4_bridge`
+  * `colcon build --packages-select asp_final_uav`
+  * 최근 타이머 기준 Mission total time: `86.48 s`
+
 ### 2026-06-17: Final mission TF 및 착륙 안정화
 
 * Gazebo pose TF 중 모델 내부 link transform이 `map -> base_link` alias를 덮어쓰지 않도록 수정했다.

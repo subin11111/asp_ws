@@ -40,6 +40,7 @@ class Px4OffboardBridge(Node):
                 ("auto_arm", True),
                 ("auto_offboard", True),
                 ("preoffboard_setpoint_count", 20),
+                ("require_offboard_command_enable", True),
                 ("enu_to_ned", True),
                 ("fast_climb_velocity_feedforward_mps", 8.0),
                 ("fast_climb_acceleration_feedforward_mps2", 4.0),
@@ -73,6 +74,7 @@ class Px4OffboardBridge(Node):
         self.land_detected = None
         self.px4_offboard_enabled = False
         self.px4_armed_flag = False
+        self.offboard_command_enabled = False
 
         px4_pub_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -92,6 +94,7 @@ class Px4OffboardBridge(Node):
         self.status_pub = self.create_publisher(String, "/asp_final/px4/status", 10)
         self.legacy_disarm_pub = self.create_publisher(Bool, "/command/disarm", 10)
         self.create_subscription(PoseStamped, "/asp_final/uav/cmd_pose", self.on_cmd_pose, 10)
+        self.create_subscription(Bool, "/asp_final/uav/offboard_command_enable", self.on_offboard_command_enable, 10)
         self.create_subscription(Bool, "/asp_final/uav/land", self.on_land, 10)
         self.create_subscription(Float32, "/asp_final/uav/gimbal_pitch_deg", self.on_gimbal_pitch, 10)
         self.create_subscription(PoseStamped, "/asp_final/uav/mission2_takeoff_origin", self.on_takeoff_origin, origin_qos)
@@ -136,6 +139,9 @@ class Px4OffboardBridge(Node):
 
     def on_cmd_pose(self, msg):
         self.last_pose = msg
+
+    def on_offboard_command_enable(self, msg):
+        self.offboard_command_enabled = bool(msg.data)
 
     def on_local_position(self, msg):
         self.local_position = msg
@@ -370,6 +376,7 @@ class Px4OffboardBridge(Node):
             "has_px4_anchor": self.px4_anchor is not None,
             "local_position_valid": local_valid,
             "setpoint_counter": self.setpoint_counter,
+            "offboard_command_enabled": self.offboard_command_enabled,
             "px4_offboard": self.px4_in_offboard(),
             "px4_armed": self.px4_armed(),
             "land_requested": self.land_requested,
@@ -408,16 +415,6 @@ class Px4OffboardBridge(Node):
             self.publish_status(throttle=True)
             return
 
-        if (
-            bool(self.get_parameter("auto_disarm_after_landed").value)
-            and not self.disarm_after_land_sent
-            and self.px4_armed()
-            and self.landed_since_ns > 0
-        ):
-            delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)
-            if self.get_clock().now().nanoseconds - self.landed_since_ns >= delay_ns:
-                self.request_disarm_after_landing("vehicle_land_detected.landed=true")
-
         offboard = OffboardControlMode()
         offboard.timestamp = self.timestamp_us()
         offboard.position = True
@@ -445,7 +442,15 @@ class Px4OffboardBridge(Node):
             if self.setpoint_counter < int(self.get_parameter("preoffboard_setpoint_count").value):
                 self.setpoint_counter += 1
 
-        ready_for_command = self.last_pose and self.setpoint_counter >= int(self.get_parameter("preoffboard_setpoint_count").value)
+        command_gate_open = (
+            self.offboard_command_enabled
+            or not bool(self.get_parameter("require_offboard_command_enable").value)
+        )
+        ready_for_command = (
+            command_gate_open
+            and self.last_pose
+            and self.setpoint_counter >= int(self.get_parameter("preoffboard_setpoint_count").value)
+        )
         if self.get_parameter("auto_offboard").value and ready_for_command and not self.px4_in_offboard() and self.should_retry(self.last_offboard_request_ns):
             self.vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
             self.last_offboard_request_ns = self.get_clock().now().nanoseconds
