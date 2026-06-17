@@ -6,9 +6,10 @@ from pathlib import Path
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
+from px4_msgs.msg import VehicleLandDetected
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, Float32, Int32, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from vision_msgs.msg import Detection3DArray
@@ -82,9 +83,12 @@ class UavMissionNode(Node):
                 ("landing_detection_timeout_s", 2.0),
                 ("landing_approach_altitude_m", 3.0),
                 ("landing_touchdown_setpoint_m", 0.0),
+                ("landing_touchdown_offset_m", 0.15),
+                ("landing_land_command_height_tolerance_m", 0.3),
                 ("landing_xy_tolerance_m", 1.0),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
+                ("landing_final_descent_requires_marker", True),
             ],
         )
         self.map_frame = self.get_parameter("map_frame").value
@@ -110,6 +114,8 @@ class UavMissionNode(Node):
         self.landing_started = self.now()
         self.landing_land_started = None
         self.landing_complete_published = False
+        self.vehicle_landed = False
+        self.last_landing_status_log = self.now()
 
         self.cmd_pose_pub = self.create_publisher(PoseStamped, "/asp_final/uav/cmd_pose", 10)
         self.land_pub = self.create_publisher(Bool, "/asp_final/uav/land", 10)
@@ -136,6 +142,12 @@ class UavMissionNode(Node):
             "/asp_final/perception/landing/marker_detections",
             self.on_landing_detection,
             10,
+        )
+        self.create_subscription(
+            VehicleLandDetected,
+            "/fmu/out/vehicle_land_detected",
+            self.on_vehicle_land_detected,
+            qos_profile_sensor_data,
         )
 
         self.tf_buffer = Buffer()
@@ -213,6 +225,14 @@ class UavMissionNode(Node):
         if detection:
             self.last_landing_detection = detection
             self.last_landing_detection_time = self.now()
+            self.publish_text(self.landing_event_pub, f"landing_marker_detected:{detection['marker_id']}")
+
+    def on_vehicle_land_detected(self, msg):
+        self.vehicle_landed = bool(msg.landed)
+        if self.phase == "landing" and self.vehicle_landed and not self.landing_complete_published:
+            self.publish_bool(self.landing_complete_pub)
+            self.landing_complete_published = True
+            self.publish_text(self.landing_event_pub, "landing_complete")
 
     def on_mission2_start(self, msg):
         if not msg.data or self.phase not in ("idle", "mission2_complete"):
@@ -239,6 +259,8 @@ class UavMissionNode(Node):
         self.last_ugv_landing_xy = None
         self.landing_land_started = None
         self.landing_complete_published = False
+        self.vehicle_landed = False
+        self.last_landing_status_log = self.now()
         self.publish_text(self.landing_event_pub, "landing_started")
 
     def tick(self):
@@ -326,41 +348,50 @@ class UavMissionNode(Node):
             self.publish_text(self.landing_state_pub, "landing")
             ugv_pose = self.current_ugv_landing_pose()
             ugv_xy = (ugv_pose[0], ugv_pose[1]) if ugv_pose is not None else None
-            landing_yaw = ugv_pose[2] if ugv_pose is not None else yaw
+            landing_yaw = ugv_pose[3] if ugv_pose is not None else yaw
             if ugv_xy is not None:
                 self.landing_target_xy = ugv_xy
             elif self.landing_target_xy is None:
                 self.landing_target_xy = (x, y)
-            if ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
+            marker_usable = ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy)
+            target_surface_z = ugv_pose[2] if ugv_pose is not None else z
+            if marker_usable:
                 self.landing_target_xy = (
                     float(self.last_landing_detection["map_x"]),
                     float(self.last_landing_detection["map_y"]),
                 )
+                target_surface_z = float(self.last_landing_detection["map_z"])
             target_x, target_y = self.landing_target_xy
             xy_error = math.hypot(target_x - x, target_y - y)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
-            complete_alt = float(self.get_parameter("landing_complete_altitude_m").value)
-            target_z = max(complete_alt, z - descent_step)
-            if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value):
-                target_z = max(float(self.get_parameter("landing_approach_altitude_m").value), z - descent_step)
+            approach_alt = target_surface_z + float(self.get_parameter("landing_approach_altitude_m").value)
+            touchdown_alt = target_surface_z + float(self.get_parameter("landing_touchdown_offset_m").value)
+            final_descent_requires_marker = bool(self.get_parameter("landing_final_descent_requires_marker").value)
+            marker_gate_open = marker_usable or not final_descent_requires_marker
+            target_z = max(touchdown_alt, z - descent_step)
+            if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value) or not marker_gate_open:
+                target_z = max(approach_alt, z - descent_step)
             if self.landing_land_started is not None:
-                target_z = float(self.get_parameter("landing_touchdown_setpoint_m").value)
+                target_z = target_surface_z + float(self.get_parameter("landing_touchdown_setpoint_m").value)
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
+            self.log_landing_status(xy_error, z, target_z, marker_usable, target_surface_z)
             ready_to_land = (
-                z <= complete_alt
+                z <= touchdown_alt + float(self.get_parameter("landing_land_command_height_tolerance_m").value)
                 and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                and marker_gate_open
             )
             timed_out_on_target = (
                 self.elapsed(self.landing_started) > float(self.get_parameter("landing_timeout_s").value)
                 and ugv_xy is not None
                 and xy_error <= float(self.get_parameter("landing_xy_tolerance_m").value)
+                and marker_gate_open
             )
             if ready_to_land or timed_out_on_target:
                 if self.landing_land_started is None:
                     self.landing_land_started = self.now()
                     self.publish_text(self.landing_event_pub, "landing_land_command_started")
                 self.publish_bool(self.land_pub)
-                if not self.landing_complete_published:
+                if self.vehicle_landed and not self.landing_complete_published:
                     self.publish_bool(self.landing_complete_pub)
                     self.landing_complete_published = True
                     self.publish_text(self.landing_event_pub, "landing_complete")
@@ -399,7 +430,7 @@ class UavMissionNode(Node):
                 pos = transform.transform.translation
                 yaw = yaw_from_quaternion(transform.transform.rotation)
                 self.last_ugv_landing_xy = (pos.x, pos.y)
-                return pos.x, pos.y, yaw
+                return pos.x, pos.y, pos.z, yaw
             except TransformException as exc:
                 last_error = (frame, exc)
         if last_error is not None:
@@ -434,6 +465,16 @@ class UavMissionNode(Node):
         )
         max_distance = float(self.get_parameter("landing_marker_max_ugv_distance_m").value)
         return math.hypot(marker_xy[0] - ugv_xy[0], marker_xy[1] - ugv_xy[1]) <= max_distance
+
+    def log_landing_status(self, xy_error, current_z, target_z, marker_usable, target_surface_z):
+        if self.elapsed(self.last_landing_status_log) < 1.0:
+            return
+        self.last_landing_status_log = self.now()
+        self.get_logger().info(
+            "LANDING_STATUS "
+            f"xy_error={xy_error:.2f} current_z={current_z:.2f} target_z={target_z:.2f} "
+            f"surface_z={target_surface_z:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
+        )
 
     def build_mission2_runtime_waypoints(self, start_x, start_y, start_z):
         if not self.csv_waypoints or not bool(self.get_parameter("enable_mission2_transition_corridor").value):

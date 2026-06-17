@@ -1,5 +1,18 @@
 # ASP ROS2 Workspace
 
+## 최신 변경 사항
+
+### 2026-06-17: Final mission TF 및 착륙 안정화
+
+* Gazebo pose TF 중 모델 내부 link transform이 `map -> base_link` alias를 덮어쓰지 않도록 수정했다.
+  * `X1_asp/base_link`, `x500_gimbal_0/base_link` 내부 link transform은 로봇 월드 pose 판정에서 제외한다.
+  * `X1_asp`, `x500_gimbal_0` 모델 루트 transform만 UGV/UAV 위치 alias에 사용한다.
+* UAV 착륙 로직을 UGV/landing marker 높이 기준으로 변경했다.
+  * 절대 고도 `z=0` 기준 하강 대신 `UGV/marker z + offset` 기준으로 최종 접근한다.
+  * marker 10 검출이 없으면 최종 하강을 막고 접근 고도에서 대기한다.
+  * `/asp_final/landing/complete`는 PX4 `vehicle_land_detected.landed` 확인 후 발행한다.
+* 착륙 디버깅을 위해 `LANDING_STATUS` 로그에 XY 오차, 현재 고도, 목표 고도, marker 사용 여부, landed 상태를 출력한다.
+
 ## 목적
 
 이 문서는 `jsb` 브랜치 기준으로 ASP ROS2 workspace에서 변경한 제어 구조와 실행 방법을 정리한다. 원래 브랜치/원본 코드 대비 UAV와 UGV 명령 토픽이 섞일 수 있는 문제를 분리하고, UGV 전용 keyboard control과 Gazebo bridge를 추가한 내용을 설명한다.
