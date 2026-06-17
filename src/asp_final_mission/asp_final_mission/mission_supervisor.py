@@ -28,6 +28,7 @@ class MissionSupervisor(Node):
         self.complete_pub = self.create_publisher(Bool, "/asp_final/mission/complete", qos)
         self.m1_start_pub = self.create_publisher(Bool, "/asp_final/ugv/mission1_start", qos)
         self.m2_start_pub = self.create_publisher(Bool, "/asp_final/uav/mission2_start", qos)
+        self.offboard_enable_pub = self.create_publisher(Bool, "/asp_final/uav/offboard_command_enable", qos)
         self.m3_start_pub = self.create_publisher(Bool, "/asp_final/ugv/rendezvous_start", qos)
         self.landing_start_pub = self.create_publisher(Bool, "/asp_final/landing/start", qos)
 
@@ -56,6 +57,7 @@ class MissionSupervisor(Node):
     def on_start(self, msg):
         if msg.data and self.state == MissionState.IDLE:
             self.state = MissionState.MISSION1_CARRIER
+            self.publish_bool(self.offboard_enable_pub, False)
             self.publish_bool(self.m1_start_pub)
             self.publish_text(self.status_pub, "Mission1 carrier path started")
 
@@ -67,6 +69,7 @@ class MissionSupervisor(Node):
         self.mission2_done = False
         self.rendezvous_done = False
         self.landing_done = False
+        self.publish_bool(self.offboard_enable_pub, False)
         self.publish_bool(self.complete_pub, False)
         self.publish_text(self.status_pub, "Mission reset")
 
@@ -97,6 +100,7 @@ class MissionSupervisor(Node):
     def tick(self):
         if self.state == MissionState.MISSION1_CARRIER and self.mission1_done:
             self.state = MissionState.MISSION2_3_PARALLEL
+            self.publish_bool(self.offboard_enable_pub, True)
             self.publish_bool(self.m2_start_pub)
             self.publish_bool(self.m3_start_pub)
             self.publish_text(self.status_pub, "Mission2 UAV exploration and Mission3 UGV rendezvous started in parallel")

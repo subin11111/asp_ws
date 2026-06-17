@@ -44,6 +44,7 @@ asp_final_uav_mission_node:
     landing_complete_altitude_m: -0.10
     landing_timeout_s: 12.0
     landing_detection_timeout_s: 2.0
+    landing_marker_search_timeout_s: 3.0
     landing_gimbal_pitch_deg: -90.0
     landing_pre_approach_altitude_m: 2.5
     landing_approach_altitude_m: 0.8

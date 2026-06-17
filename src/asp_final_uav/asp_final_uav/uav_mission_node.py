@@ -87,6 +87,7 @@ class UavMissionNode(Node):
                 ("landing_complete_altitude_m", 0.0),
                 ("landing_timeout_s", 30.0),
                 ("landing_detection_timeout_s", 2.0),
+                ("landing_marker_search_timeout_s", 3.0),
                 ("landing_gimbal_pitch_deg", -90.0),
                 ("landing_pre_approach_altitude_m", 2.0),
                 ("landing_approach_altitude_m", 3.0),
@@ -129,7 +130,9 @@ class UavMissionNode(Node):
         self.landing_started = self.now()
         self.landing_land_started = None
         self.landing_align_started = None
+        self.landing_marker_search_started = None
         self.landing_complete_published = False
+        self.mission_state = "IDLE"
         self.mandatory_waypoint_tags = {
             tag.strip()
             for tag in str(self.get_parameter("mandatory_waypoint_tags_csv").value).split(",")
@@ -160,6 +163,7 @@ class UavMissionNode(Node):
 
         self.create_subscription(Bool, "/asp_final/uav/mission2_start", self.on_mission2_start, 10)
         self.create_subscription(Bool, "/asp_final/landing/start", self.on_landing_start, 10)
+        self.create_subscription(String, "/asp_final/mission/state", self.on_mission_state, 10)
         self.create_subscription(Int32, "/asp_final/perception/uav/marker_id", self.on_marker_id, 10)
         self.create_subscription(
             Detection3DArray,
@@ -258,6 +262,9 @@ class UavMissionNode(Node):
         self.detected_marker_ids.add(int(msg.data))
         self.publish_text(self.exploration_event_pub, f"MARKER_DETECTED:{msg.data}")
 
+    def on_mission_state(self, msg):
+        self.mission_state = str(msg.data)
+
     def on_landing_detection(self, msg):
         if self.phase != "landing":
             return
@@ -300,6 +307,7 @@ class UavMissionNode(Node):
         self.last_ugv_landing_xy = None
         self.landing_land_started = None
         self.landing_align_started = None
+        self.landing_marker_search_started = None
         self.landing_complete_published = False
         self.publish_text(self.landing_event_pub, "landing_started")
         self.publish_text(
@@ -310,7 +318,8 @@ class UavMissionNode(Node):
     def tick(self):
         self.publish_text(self.exploration_state_pub, self.phase)
         if self.phase == "idle":
-            return
+            if self.mission_state != "MISSION1_CARRIER":
+                return
         try:
             x, y, z, yaw = self.current_pose()
             self.last_pose = (x, y, z, yaw)
@@ -319,6 +328,12 @@ class UavMissionNode(Node):
             if self.last_pose is None:
                 return
             x, y, z, yaw = self.last_pose
+
+        if self.phase == "idle":
+            # During Mission1, keep publishing the live pose so PX4 bridge can
+            # pre-roll setpoints and latch anchors before Mission2 starts.
+            self.cmd_pose_pub.publish(self.pose_msg(x, y, z, yaw))
+            return
 
         if self.phase == "takeoff":
             if self.takeoff_origin is None:
@@ -434,6 +449,7 @@ class UavMissionNode(Node):
                 z_error = abs(z - target_z)
                 if xy_error <= xy_tolerance and yaw_error <= yaw_tolerance and z_error <= max(0.3, descent_step):
                     self.landing_stage = "marker_search"
+                    self.landing_marker_search_started = self.now()
                     self.publish_text(self.landing_event_pub, "landing_pre_approach_complete")
                     self.publish_text(self.landing_event_pub, "landing_marker_search_started")
                 return
@@ -445,6 +461,7 @@ class UavMissionNode(Node):
                     self.landing_target_xy = ugv_xy if ugv_xy is not None else self.landing_detection_xy()
                     self.landing_target_yaw = self.choose_landing_yaw(default_landing_yaw)
                     self.landing_stage = "descend"
+                    self.landing_marker_search_started = None
                     self.landing_align_started = None
                     self.get_logger().info(
                         f"LANDING_MARKER_LOCK target_x={self.landing_target_xy[0]:.2f} "
@@ -456,6 +473,26 @@ class UavMissionNode(Node):
                         "landing_marker_lock_acquired:"
                         f"x={self.landing_target_xy[0]:.2f}:y={self.landing_target_xy[1]:.2f}:"
                         f"yaw_deg={math.degrees(self.landing_target_yaw):.1f}",
+                    )
+                elif (
+                    self.landing_marker_search_started is not None
+                    and self.elapsed(self.landing_marker_search_started)
+                    >= float(self.get_parameter("landing_marker_search_timeout_s").value)
+                ):
+                    fallback_xy = ugv_xy if ugv_xy is not None else self.rendezvous_goal_xy
+                    self.landing_target_xy = fallback_xy
+                    self.landing_target_yaw = default_landing_yaw
+                    self.landing_stage = "descend"
+                    self.landing_marker_search_started = None
+                    self.landing_align_started = None
+                    self.get_logger().warn(
+                        f"LANDING_MARKER_SEARCH_TIMEOUT fallback_x={fallback_xy[0]:.2f} "
+                        f"fallback_y={fallback_xy[1]:.2f}",
+                    )
+                    self.publish_text(
+                        self.landing_event_pub,
+                        "landing_marker_search_timeout_fallback:"
+                        f"x={fallback_xy[0]:.2f}:y={fallback_xy[1]:.2f}",
                     )
                 return
 

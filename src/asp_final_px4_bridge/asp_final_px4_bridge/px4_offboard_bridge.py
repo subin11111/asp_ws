@@ -52,6 +52,7 @@ class Px4OffboardBridge(Node):
                 ("fallback_touchdown_altitude_m", 0.25),
                 ("fallback_touchdown_speed_mps", 0.35),
                 ("fallback_touchdown_hold_sec", 1.0),
+                ("require_offboard_command_enable", True),
             ],
         )
         self.last_pose = None
@@ -80,6 +81,7 @@ class Px4OffboardBridge(Node):
         self.land_detected = None
         self.px4_offboard_enabled = False
         self.px4_armed_flag = False
+        self.offboard_command_enabled = False
 
         px4_pub_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -101,6 +103,7 @@ class Px4OffboardBridge(Node):
         self.landing_complete_pub = self.create_publisher(Bool, "/asp_final/landing/complete", 10)
         self.create_subscription(PoseStamped, "/asp_final/uav/cmd_pose", self.on_cmd_pose, 10)
         self.create_subscription(Bool, "/asp_final/uav/land", self.on_land, 10)
+        self.create_subscription(Bool, "/asp_final/uav/offboard_command_enable", self.on_offboard_command_enable, 10)
         self.create_subscription(Float32, "/asp_final/uav/gimbal_pitch_deg", self.on_gimbal_pitch, 10)
         self.create_subscription(PoseStamped, "/asp_final/uav/mission2_takeoff_origin", self.on_takeoff_origin, origin_qos)
         self.create_subscription(VehicleLocalPosition, "/fmu/out/vehicle_local_position", self.on_local_position, qos_profile_sensor_data)
@@ -158,6 +161,14 @@ class Px4OffboardBridge(Node):
 
     def on_cmd_pose(self, msg):
         self.last_pose = msg
+        if self.map_anchor is None:
+            self.map_anchor = (
+                float(msg.pose.position.x),
+                float(msg.pose.position.y),
+                float(msg.pose.position.z),
+            )
+            self.set_px4_anchor_from_local_position()
+            self.get_logger().info("Latched map anchor from /asp_final/uav/cmd_pose for pre-roll")
 
     def on_local_position(self, msg):
         self.local_position = msg
@@ -245,6 +256,10 @@ class Px4OffboardBridge(Node):
             self.last_land_request_ns = self.get_clock().now().nanoseconds
             if not bool(self.get_parameter("land_via_offboard").value):
                 self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+
+    def on_offboard_command_enable(self, msg):
+        self.offboard_command_enabled = bool(msg.data)
+        self.publish_status()
 
     def on_land_detected(self, msg):
         self.land_detected = msg
@@ -406,6 +421,7 @@ class Px4OffboardBridge(Node):
             "has_px4_anchor": self.px4_anchor is not None,
             "local_position_valid": local_valid,
             "setpoint_counter": self.setpoint_counter,
+            "offboard_command_enabled": self.offboard_command_enabled,
             "px4_offboard": self.px4_in_offboard(),
             "px4_armed": self.px4_armed(),
             "land_requested": self.land_requested,
@@ -439,10 +455,7 @@ class Px4OffboardBridge(Node):
                 and not self.disarm_after_land_sent
                 and self.px4_armed()
             ):
-                delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)
-                if self.land_ready_since_ns > 0 and now_ns - self.land_ready_since_ns >= delay_ns:
-                    self.request_disarm_after_landing("vehicle_land_detected.landed=true")
-                elif self.fallback_touchdown_ready():
+                if self.fallback_touchdown_ready():
                     self.request_disarm_after_landing("fallback_touchdown_ready")
             if not use_offboard_landing:
                 self.publish_status(throttle=True)
@@ -476,12 +489,27 @@ class Px4OffboardBridge(Node):
                 self.setpoint_counter += 1
 
         ready_for_command = self.last_pose and self.setpoint_counter >= int(self.get_parameter("preoffboard_setpoint_count").value)
-        if self.get_parameter("auto_offboard").value and ready_for_command and not self.px4_in_offboard() and self.should_retry(self.last_offboard_request_ns):
+        command_gate_open = self.offboard_command_enabled or not bool(
+            self.get_parameter("require_offboard_command_enable").value
+        )
+        if (
+            self.get_parameter("auto_offboard").value
+            and command_gate_open
+            and ready_for_command
+            and not self.px4_in_offboard()
+            and self.should_retry(self.last_offboard_request_ns)
+        ):
             self.vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
             self.last_offboard_request_ns = self.get_clock().now().nanoseconds
             self.offboard_sent = True
             self.get_logger().info("Requested PX4 OFFBOARD mode after setpoint pre-roll")
-        if self.get_parameter("auto_arm").value and ready_for_command and not self.px4_armed() and self.should_retry(self.last_arm_request_ns):
+        if (
+            self.get_parameter("auto_arm").value
+            and command_gate_open
+            and ready_for_command
+            and not self.px4_armed()
+            and self.should_retry(self.last_arm_request_ns)
+        ):
             self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
             self.last_arm_request_ns = self.get_clock().now().nanoseconds
             self.arm_sent = True
