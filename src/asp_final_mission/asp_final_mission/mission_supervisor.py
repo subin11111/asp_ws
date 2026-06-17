@@ -111,6 +111,9 @@ class MissionSupervisor(Node):
             self.publish_bool(self.complete_pub, True)
             self.publish_text(self.status_pub, "Final mission complete")
 
+        if self.state == MissionState.COMPLETE:
+            self.publish_bool(self.complete_pub, True)
+
         self.publish_text(self.state_pub, self.state.value)
 
 

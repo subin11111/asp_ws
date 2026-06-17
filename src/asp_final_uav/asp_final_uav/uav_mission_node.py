@@ -79,6 +79,9 @@ class UavMissionNode(Node):
                 ("continue_on_marker_timeout", True),
                 ("marker_wait_timeout_sec", 3.0),
                 ("do_not_block_waypoint_progress_on_marker", True),
+                ("mandatory_waypoint_tags_csv", ""),
+                ("proximity_confirm_waypoint_tags_csv", ""),
+                ("proximity_confirm_distance_m", 6.0),
                 ("landing_hover_altitude_m", 4.0),
                 ("landing_descent_step_m", 1.0),
                 ("landing_complete_altitude_m", 0.0),
@@ -90,6 +93,9 @@ class UavMissionNode(Node):
                 ("landing_align_hold_sec", 2.0),
                 ("landing_touchdown_setpoint_m", 0.0),
                 ("landing_xy_tolerance_m", 1.0),
+                ("landing_yaw_tolerance_deg", 12.0),
+                ("landing_use_marker_yaw", False),
+                ("landing_marker_yaw_max_error_deg", 25.0),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
                 ("landing_target_update_max_jump_m", 0.5),
@@ -117,12 +123,23 @@ class UavMissionNode(Node):
         self.last_ugv_landing_xy = None
         self.takeoff_origin = None
         self.landing_target_xy = None
+        self.landing_target_yaw = None
         self.rendezvous_goal_xy = self.load_rendezvous_goal()
         self.landing_stage = "idle"
         self.landing_started = self.now()
         self.landing_land_started = None
         self.landing_align_started = None
         self.landing_complete_published = False
+        self.mandatory_waypoint_tags = {
+            tag.strip()
+            for tag in str(self.get_parameter("mandatory_waypoint_tags_csv").value).split(",")
+            if tag.strip()
+        }
+        self.proximity_confirm_waypoint_tags = {
+            tag.strip()
+            for tag in str(self.get_parameter("proximity_confirm_waypoint_tags_csv").value).split(",")
+            if tag.strip()
+        }
 
         self.cmd_pose_pub = self.create_publisher(PoseStamped, "/asp_final/uav/cmd_pose", 10)
         self.land_pub = self.create_publisher(Bool, "/asp_final/uav/land", 10)
@@ -276,6 +293,7 @@ class UavMissionNode(Node):
         self.landing_started = self.now()
         self.rendezvous_goal_xy = self.load_rendezvous_goal()
         self.landing_target_xy = self.rendezvous_goal_xy
+        self.landing_target_yaw = None
         self.landing_stage = "pre_approach"
         self.last_landing_detection = None
         self.last_landing_detection_time = None
@@ -330,14 +348,22 @@ class UavMissionNode(Node):
                 return
             wp = self.waypoints[self.index]
             expected_marker_id = self.expected_marker_id(wp)
-            if expected_marker_id is not None and expected_marker_id in self.detected_marker_ids:
+            if (
+                not self.is_mandatory_waypoint(wp)
+                and expected_marker_id is not None
+                and expected_marker_id in self.detected_marker_ids
+            ):
                 self.advance_waypoint("marker_already_detected", wp, 0.0, 0.0)
                 return
             self.cmd_pose_pub.publish(self.pose_msg(wp.x, wp.y, wp.z, wp.yaw))
             self.publish_gimbal(wp.gimbal_pitch_deg)
             dx, dy, dz, dxy, d3 = self.compute_waypoint_error((x, y, z), wp)
             self.log_waypoint_error(wp, dxy, dz, d3)
-            if expected_marker_id is not None and expected_marker_id in self.detected_marker_ids:
+            if (
+                not self.is_mandatory_waypoint(wp)
+                and expected_marker_id is not None
+                and expected_marker_id in self.detected_marker_ids
+            ):
                 self.advance_waypoint("marker_detected", wp, dxy, dz)
                 return
             reached = self.waypoint_reached(wp, dxy, dz, d3)
@@ -353,7 +379,8 @@ class UavMissionNode(Node):
             xy_close_force = self.xy_close_force_advance(wp, dxy, dz)
             near_waypoint = dxy < max(float(self.get_parameter("waypoint_xy_tolerance_m").value) * 2.0, 2.5)
             marker_wait_done = (
-                wp.marker_budget > 0
+                not self.is_mandatory_waypoint(wp)
+                and wp.marker_budget > 0
                 and near_waypoint
                 and bool(self.get_parameter("continue_on_marker_timeout").value)
                 and bool(self.get_parameter("do_not_block_waypoint_progress_on_marker").value)
@@ -367,13 +394,15 @@ class UavMissionNode(Node):
                     if self.elapsed(self.wp_hold_started) < wp.hold_sec:
                         return
                 self.advance_waypoint("arrived", wp, dxy, dz)
-            elif xy_close_force:
+            elif self.proximity_confirm_reached(wp, dxy):
+                self.advance_waypoint("proximity_confirmed", wp, dxy, dz)
+            elif xy_close_force and not self.is_mandatory_waypoint(wp):
                 self.advance_waypoint("xy_close_force", wp, dxy, dz)
-            elif stuck or max_same_elapsed:
+            elif (stuck or max_same_elapsed) and not self.is_mandatory_waypoint(wp):
                 self.advance_waypoint("stuck_skip", wp, dxy, dz)
             elif marker_wait_done:
                 self.advance_waypoint("marker_timeout_continue", wp, dxy, dz)
-            elif timed_out:
+            elif timed_out and not self.is_mandatory_waypoint(wp):
                 self.advance_waypoint("timeout_skip", wp, dxy, dz)
             return
 
@@ -382,23 +411,28 @@ class UavMissionNode(Node):
             self.publish_gimbal(float(self.get_parameter("landing_gimbal_pitch_deg").value))
             ugv_pose = self.current_ugv_landing_pose()
             ugv_xy = (ugv_pose[0], ugv_pose[1]) if ugv_pose is not None else None
-            landing_yaw = ugv_pose[2] if ugv_pose is not None else yaw
+            default_landing_yaw = ugv_pose[2] if ugv_pose is not None else yaw
             pre_approach_alt = float(self.get_parameter("landing_pre_approach_altitude_m").value)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
             complete_alt = float(self.get_parameter("landing_complete_altitude_m").value)
             approach_alt = float(self.get_parameter("landing_approach_altitude_m").value)
             xy_tolerance = float(self.get_parameter("landing_xy_tolerance_m").value)
+            yaw_tolerance = math.radians(float(self.get_parameter("landing_yaw_tolerance_deg").value))
             align_hold_sec = float(self.get_parameter("landing_align_hold_sec").value)
             if self.landing_target_xy is None:
                 self.landing_target_xy = self.rendezvous_goal_xy
+            if self.landing_target_yaw is None:
+                self.landing_target_yaw = default_landing_yaw
             target_x, target_y = self.landing_target_xy
+            landing_yaw = self.landing_target_yaw
             xy_error = math.hypot(target_x - x, target_y - y)
+            yaw_error = abs(math.atan2(math.sin(landing_yaw - yaw), math.cos(landing_yaw - yaw)))
 
             if self.landing_stage == "pre_approach":
                 target_z = pre_approach_alt
                 self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
                 z_error = abs(z - target_z)
-                if xy_error <= xy_tolerance and z_error <= max(0.3, descent_step):
+                if xy_error <= xy_tolerance and yaw_error <= yaw_tolerance and z_error <= max(0.3, descent_step):
                     self.landing_stage = "marker_search"
                     self.publish_text(self.landing_event_pub, "landing_pre_approach_complete")
                     self.publish_text(self.landing_event_pub, "landing_marker_search_started")
@@ -407,17 +441,21 @@ class UavMissionNode(Node):
             if self.landing_stage == "marker_search":
                 target_z = pre_approach_alt
                 self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
-                if ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
-                    self.landing_target_xy = self.landing_detection_xy()
+                if self.landing_detection_is_usable(ugv_xy):
+                    self.landing_target_xy = ugv_xy if ugv_xy is not None else self.landing_detection_xy()
+                    self.landing_target_yaw = self.choose_landing_yaw(default_landing_yaw)
                     self.landing_stage = "descend"
                     self.landing_align_started = None
                     self.get_logger().info(
                         f"LANDING_MARKER_LOCK target_x={self.landing_target_xy[0]:.2f} "
-                        f"target_y={self.landing_target_xy[1]:.2f}"
+                        f"target_y={self.landing_target_xy[1]:.2f} "
+                        f"target_yaw_deg={math.degrees(self.landing_target_yaw):.1f}"
                     )
                     self.publish_text(
                         self.landing_event_pub,
-                        f"landing_marker_lock_acquired:x={self.landing_target_xy[0]:.2f}:y={self.landing_target_xy[1]:.2f}",
+                        "landing_marker_lock_acquired:"
+                        f"x={self.landing_target_xy[0]:.2f}:y={self.landing_target_xy[1]:.2f}:"
+                        f"yaw_deg={math.degrees(self.landing_target_yaw):.1f}",
                     )
                 return
 
@@ -425,8 +463,8 @@ class UavMissionNode(Node):
             allow_target_updates = self.landing_land_started is None and not (
                 freeze_after_align and self.landing_align_started is not None
             )
-            if allow_target_updates and ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy):
-                detection_xy = self.landing_detection_xy()
+            if allow_target_updates and self.landing_detection_is_usable(ugv_xy):
+                detection_xy = ugv_xy if ugv_xy is not None else self.landing_detection_xy()
                 jump_limit = float(self.get_parameter("landing_target_update_max_jump_m").value)
                 jump_distance = math.hypot(
                     detection_xy[0] - self.landing_target_xy[0],
@@ -434,10 +472,14 @@ class UavMissionNode(Node):
                 )
                 if jump_limit <= 0.0 or jump_distance <= jump_limit:
                     self.landing_target_xy = detection_xy
+                    self.landing_target_yaw = self.choose_landing_yaw(default_landing_yaw)
                     target_x, target_y = self.landing_target_xy
+                    landing_yaw = self.landing_target_yaw
                     xy_error = math.hypot(target_x - x, target_y - y)
+                    yaw_error = abs(math.atan2(math.sin(landing_yaw - yaw), math.cos(landing_yaw - yaw)))
                     self.get_logger().info(
-                        f"LANDING_TARGET_UPDATE target_x={target_x:.2f} target_y={target_y:.2f} xy_error={xy_error:.2f}",
+                        f"LANDING_TARGET_UPDATE target_x={target_x:.2f} target_y={target_y:.2f} "
+                        f"xy_error={xy_error:.2f} yaw_error_deg={math.degrees(yaw_error):.1f}",
                         throttle_duration_sec=1.0,
                     )
                 else:
@@ -451,7 +493,7 @@ class UavMissionNode(Node):
             target_z = max(complete_alt, z - descent_step)
             if self.landing_land_started is not None:
                 target_z = float(self.get_parameter("landing_touchdown_setpoint_m").value)
-            elif xy_error > xy_tolerance:
+            elif xy_error > xy_tolerance or yaw_error > yaw_tolerance:
                 target_z = max(approach_alt, z - descent_step)
                 self.landing_align_started = None
             elif not at_approach_alt:
@@ -466,11 +508,13 @@ class UavMissionNode(Node):
                 self.landing_align_started is not None
                 and self.elapsed(self.landing_align_started) >= align_hold_sec
                 and xy_error <= xy_tolerance
+                and yaw_error <= yaw_tolerance
                 and at_approach_alt
             )
             timed_out_on_target = (
                 self.elapsed(self.landing_started) > float(self.get_parameter("landing_timeout_s").value)
                 and xy_error <= xy_tolerance
+                and yaw_error <= yaw_tolerance
                 and self.landing_stage == "descend"
             )
             if ready_to_land or timed_out_on_target:
@@ -479,9 +523,8 @@ class UavMissionNode(Node):
                     self.publish_text(self.landing_event_pub, "landing_land_command_started")
                 self.publish_bool(self.land_pub)
                 if not self.landing_complete_published:
-                    self.publish_bool(self.landing_complete_pub)
                     self.landing_complete_published = True
-                    self.publish_text(self.landing_event_pub, "landing_complete")
+                    self.publish_text(self.landing_event_pub, "landing_touchdown_pending")
 
     def select_landing_detection(self, msg):
         landing_marker_id = int(self.get_parameter("landing_marker_id").value)
@@ -501,6 +544,7 @@ class UavMissionNode(Node):
                 "map_x": pose.position.x,
                 "map_y": pose.position.y,
                 "map_z": pose.position.z,
+                "yaw": yaw_from_quaternion(pose.orientation),
                 "has_map": True,
             }
         return None
@@ -543,9 +587,11 @@ class UavMissionNode(Node):
                 return False
         return True
 
-    def landing_detection_is_usable_for_ugv(self, ugv_xy):
+    def landing_detection_is_usable(self, ugv_xy):
         if not self.landing_detection_has_map():
             return False
+        if ugv_xy is None:
+            return True
         marker_xy = (
             float(self.last_landing_detection["map_x"]),
             float(self.last_landing_detection["map_y"]),
@@ -558,6 +604,31 @@ class UavMissionNode(Node):
             float(self.last_landing_detection["map_x"]),
             float(self.last_landing_detection["map_y"]),
         )
+
+    def landing_detection_yaw(self, fallback_yaw):
+        if not self.last_landing_detection:
+            return fallback_yaw
+        try:
+            yaw = float(self.last_landing_detection["yaw"])
+        except (KeyError, TypeError, ValueError):
+            return fallback_yaw
+        return yaw if math.isfinite(yaw) else fallback_yaw
+
+    def choose_landing_yaw(self, fallback_yaw):
+        if not bool(self.get_parameter("landing_use_marker_yaw").value):
+            return fallback_yaw
+        marker_yaw = self.landing_detection_yaw(fallback_yaw)
+        max_error = math.radians(float(self.get_parameter("landing_marker_yaw_max_error_deg").value))
+        yaw_error = abs(math.atan2(math.sin(marker_yaw - fallback_yaw), math.cos(marker_yaw - fallback_yaw)))
+        if yaw_error > max_error:
+            self.get_logger().warn(
+                f"LANDING_MARKER_YAW_REJECTED marker_yaw_deg={math.degrees(marker_yaw):.1f} "
+                f"fallback_yaw_deg={math.degrees(fallback_yaw):.1f} "
+                f"yaw_error_deg={math.degrees(yaw_error):.1f}",
+                throttle_duration_sec=1.0,
+            )
+            return fallback_yaw
+        return marker_yaw
 
     def build_mission2_runtime_waypoints(self, start_x, start_y, start_z):
         if not self.csv_waypoints or not bool(self.get_parameter("enable_mission2_transition_corridor").value):
@@ -591,7 +662,11 @@ class UavMissionNode(Node):
         while self.index < len(self.waypoints):
             waypoint = self.waypoints[self.index]
             expected_marker_id = self.expected_marker_id(waypoint)
-            if expected_marker_id is None or expected_marker_id not in self.detected_marker_ids:
+            if (
+                self.is_mandatory_waypoint(waypoint)
+                or expected_marker_id is None
+                or expected_marker_id not in self.detected_marker_ids
+            ):
                 break
             self.publish_text(
                 self.exploration_event_pub,
@@ -634,6 +709,15 @@ class UavMissionNode(Node):
             return None
         return int(match.group(1))
 
+    def is_mandatory_waypoint(self, waypoint):
+        return waypoint.tag in self.mandatory_waypoint_tags
+
+    def proximity_confirm_reached(self, waypoint, dxy):
+        return (
+            waypoint.tag in self.proximity_confirm_waypoint_tags
+            and dxy <= float(self.get_parameter("proximity_confirm_distance_m").value)
+        )
+
     def xy_close_force_advance(self, waypoint, dxy, dz):
         if not bool(self.get_parameter("force_advance_when_xy_close").value):
             self.xy_close_started = None
@@ -670,6 +754,8 @@ class UavMissionNode(Node):
         elif reason == "marker_already_detected":
             marker_id = self.expected_marker_id(waypoint)
             event = f"WAYPOINT_MARKER_ALREADY_DETECTED_SKIP:{waypoint.tag}:marker={marker_id}"
+        elif reason == "proximity_confirmed":
+            event = f"WAYPOINT_PROXIMITY_CONFIRMED:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         else:
             event = f"WAYPOINT_TIMEOUT_SKIP:{waypoint.tag}:dxy={dxy:.2f}:dz={dz:.2f}"
         self.publish_text(self.exploration_event_pub, event)

@@ -47,6 +47,11 @@ class Px4OffboardBridge(Node):
                 ("auto_disarm_after_landed", True),
                 ("landed_disarm_delay_sec", 2.5),
                 ("land_command_retry_sec", 1.0),
+                ("land_via_offboard", True),
+                ("fallback_touchdown_enable", True),
+                ("fallback_touchdown_altitude_m", 0.25),
+                ("fallback_touchdown_speed_mps", 0.35),
+                ("fallback_touchdown_hold_sec", 1.0),
             ],
         )
         self.last_pose = None
@@ -67,8 +72,10 @@ class Px4OffboardBridge(Node):
         self.last_status_pub_ns = 0
         self.land_requested = False
         self.disarm_after_land_sent = False
+        self.legacy_disarm_published = False
         self.landed_since_ns = 0
         self.land_ready_since_ns = 0
+        self.fallback_touchdown_since_ns = 0
         self.last_land_request_ns = 0
         self.land_detected = None
         self.px4_offboard_enabled = False
@@ -91,6 +98,7 @@ class Px4OffboardBridge(Node):
         self.command_pub = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", px4_pub_qos)
         self.status_pub = self.create_publisher(String, "/asp_final/px4/status", 10)
         self.legacy_disarm_pub = self.create_publisher(Bool, "/command/disarm", 10)
+        self.landing_complete_pub = self.create_publisher(Bool, "/asp_final/landing/complete", 10)
         self.create_subscription(PoseStamped, "/asp_final/uav/cmd_pose", self.on_cmd_pose, 10)
         self.create_subscription(Bool, "/asp_final/uav/land", self.on_land, 10)
         self.create_subscription(Float32, "/asp_final/uav/gimbal_pitch_deg", self.on_gimbal_pitch, 10)
@@ -128,11 +136,25 @@ class Px4OffboardBridge(Node):
 
     def request_disarm_after_landing(self, reason):
         self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
+        self.publish_legacy_disarm(reason)
+        self.disarm_after_land_sent = True
+        self.publish_landing_complete(reason)
+        self.get_logger().info(f"Requested PX4 DISARM and published /command/disarm after {reason}")
+
+    def publish_legacy_disarm(self, reason):
+        if self.legacy_disarm_published:
+            return
         disarm_msg = Bool()
         disarm_msg.data = True
         self.legacy_disarm_pub.publish(disarm_msg)
-        self.disarm_after_land_sent = True
-        self.get_logger().info(f"Requested PX4 DISARM and published /command/disarm after {reason}")
+        self.legacy_disarm_published = True
+        self.get_logger().info(f"Published legacy /command/disarm after {reason}")
+
+    def publish_landing_complete(self, reason):
+        complete_msg = Bool()
+        complete_msg.data = True
+        self.landing_complete_pub.publish(complete_msg)
+        self.get_logger().info(f"Published /asp_final/landing/complete after {reason}")
 
     def on_cmd_pose(self, msg):
         self.last_pose = msg
@@ -221,7 +243,8 @@ class Px4OffboardBridge(Node):
         if msg.data:
             self.land_requested = True
             self.last_land_request_ns = self.get_clock().now().nanoseconds
-            self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+            if not bool(self.get_parameter("land_via_offboard").value):
+                self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
 
     def on_land_detected(self, msg):
         self.land_detected = msg
@@ -240,6 +263,29 @@ class Px4OffboardBridge(Node):
         if self.land_detected is None:
             return False
         return bool(self.land_detected.landed)
+
+    def fallback_touchdown_ready(self):
+        if not bool(self.get_parameter("fallback_touchdown_enable").value):
+            self.fallback_touchdown_since_ns = 0
+            return False
+        if not self.land_requested or self.local_position is None:
+            self.fallback_touchdown_since_ns = 0
+            return False
+        current_map_z = self.current_map_z()
+        if current_map_z is None:
+            self.fallback_touchdown_since_ns = 0
+            return False
+        horizontal_speed = math.hypot(float(self.local_position.vx), float(self.local_position.vy))
+        vertical_speed = abs(float(self.local_position.vz))
+        speed_limit = float(self.get_parameter("fallback_touchdown_speed_mps").value)
+        altitude_limit = float(self.get_parameter("fallback_touchdown_altitude_m").value)
+        if current_map_z <= altitude_limit and horizontal_speed <= speed_limit and vertical_speed <= speed_limit:
+            if self.fallback_touchdown_since_ns == 0:
+                self.fallback_touchdown_since_ns = self.get_clock().now().nanoseconds
+            hold_ns = int(float(self.get_parameter("fallback_touchdown_hold_sec").value) * 1e9)
+            return (self.get_clock().now().nanoseconds - self.fallback_touchdown_since_ns) >= hold_ns
+        self.fallback_touchdown_since_ns = 0
+        return False
 
     def set_px4_anchor_from_local_position(self):
         if self.local_position is None:
@@ -368,6 +414,7 @@ class Px4OffboardBridge(Node):
             "land_detected_ground_contact": bool(self.land_detected and self.land_detected.ground_contact),
             "land_detected_at_rest": bool(self.land_detected and self.land_detected.at_rest),
             "land_disarm_ready": self.land_disarm_ready(),
+            "fallback_touchdown_ready": self.fallback_touchdown_ready(),
             "disarm_after_land_sent": self.disarm_after_land_sent,
             "nav_state": int(self.vehicle_status.nav_state) if self.vehicle_status else None,
             "arming_state": int(self.vehicle_status.arming_state) if self.vehicle_status else None,
@@ -383,20 +430,23 @@ class Px4OffboardBridge(Node):
         if self.land_requested:
             now_ns = self.get_clock().now().nanoseconds
             retry_ns = int(float(self.get_parameter("land_command_retry_sec").value) * 1e9)
-            if self.px4_armed() and now_ns - self.last_land_request_ns >= retry_ns:
+            use_offboard_landing = bool(self.get_parameter("land_via_offboard").value)
+            if (not use_offboard_landing) and self.px4_armed() and now_ns - self.last_land_request_ns >= retry_ns:
                 self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
                 self.last_land_request_ns = now_ns
             if (
                 bool(self.get_parameter("auto_disarm_after_landed").value)
                 and not self.disarm_after_land_sent
                 and self.px4_armed()
-                and self.land_ready_since_ns > 0
             ):
                 delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)
-                if now_ns - self.land_ready_since_ns >= delay_ns:
+                if self.land_ready_since_ns > 0 and now_ns - self.land_ready_since_ns >= delay_ns:
                     self.request_disarm_after_landing("vehicle_land_detected.landed=true")
-            self.publish_status(throttle=True)
-            return
+                elif self.fallback_touchdown_ready():
+                    self.request_disarm_after_landing("fallback_touchdown_ready")
+            if not use_offboard_landing:
+                self.publish_status(throttle=True)
+                return
 
         offboard = OffboardControlMode()
         offboard.timestamp = self.timestamp_us()

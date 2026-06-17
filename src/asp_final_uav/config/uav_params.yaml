@@ -36,18 +36,24 @@ asp_final_uav_mission_node:
     continue_on_marker_timeout: false
     marker_wait_timeout_sec: 8.0
     do_not_block_waypoint_progress_on_marker: true
+    mandatory_waypoint_tags_csv: "marker_2_roof_detect"
+    proximity_confirm_waypoint_tags_csv: "marker_2_roof_detect"
+    proximity_confirm_distance_m: 6.0
     landing_hover_altitude_m: 4.0
-    landing_descent_step_m: 0.3
-    landing_complete_altitude_m: 0.02
-    landing_timeout_s: 30.0
-    landing_detection_timeout_s: 5.0
+    landing_descent_step_m: 0.9
+    landing_complete_altitude_m: -0.10
+    landing_timeout_s: 12.0
+    landing_detection_timeout_s: 2.0
     landing_gimbal_pitch_deg: -90.0
     landing_pre_approach_altitude_m: 2.5
-    landing_approach_altitude_m: 1.5
-    landing_align_hold_sec: 2.5
-    landing_touchdown_setpoint_m: 0.0
-    landing_xy_tolerance_m: 1.0
+    landing_approach_altitude_m: 0.8
+    landing_align_hold_sec: 0.3
+    landing_touchdown_setpoint_m: -0.2
+    landing_xy_tolerance_m: 0.2
+    landing_yaw_tolerance_deg: 10.0
+    landing_use_marker_yaw: false
+    landing_marker_yaw_max_error_deg: 25.0
     landing_marker_id: 10
-    landing_marker_max_ugv_distance_m: 4.0
-    landing_target_update_max_jump_m: 0.5
-    landing_freeze_target_after_align: true
+    landing_marker_max_ugv_distance_m: 8.0
+    landing_target_update_max_jump_m: 1.0
+    landing_freeze_target_after_align: false
