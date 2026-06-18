@@ -2,6 +2,23 @@
 
 ## 최신 변경 사항
 
+### 2026-06-18: UGV 속도 상향 및 착륙 prealign gate 추가
+
+* Mission1 UGV carrier 속도 기본값을 `4.0 m/s`로 올렸다.
+  * `mission1_cruise_speed`, `mission1_max_linear_speed`, `mission1_min_linear_speed`: `4.0`
+  * Mission1 종료부 감속 설정은 기존 값 그대로 유지했다.
+* Mission3 rendezvous 일반 주행 속도도 `4.0 m/s`로 올렸다.
+  * `mission3_cruise_speed`, `mission3_max_linear_speed`: `4.0`
+  * 초기 저속 boost 전환 시간을 줄여 Mission3 초반 병목을 완화했다.
+* UAV landing phase에 prealign gate를 추가했다.
+  * landing target과의 XY 오차가 `landing_prealign_xy_tolerance_m: 2.5`보다 크면 하강하지 않고 `prelanding_altitude_m: 8.0` 기준 고도를 유지한다.
+  * UGV/ArUco target 위에 먼저 정렬한 뒤 기존 하강 로직으로 넘어가도록 해, 먼 거리 이동과 하강이 동시에 일어나며 옆으로 착륙하는 문제를 줄인다.
+  * 낮은 고도에서도 XY가 충분히 맞지 않으면 landing target lock이 걸리지 않도록 보정했다.
+* 검증 기록
+  * `python3 -m py_compile src/asp_final_uav/asp_final_uav/uav_mission_node.py`
+  * `colcon build --packages-select asp_final_uav --symlink-install`
+  * `colcon build --packages-select asp_final_ugv --symlink-install`
+
 ### 2026-06-18: Prelanding target lock 및 착륙 drift 완화
 
 * Mission2 완료 직후 UAV가 landing start를 기다리는 동안 UGV landing marker 상공으로 미리 접근하도록 했다.

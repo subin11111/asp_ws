@@ -13,9 +13,9 @@ asp_final_ugv_path_follower:
 
     # Mission1: UAV carrier mode
     mission1_carrier_mode: true
-    mission1_cruise_speed: 3.3
-    mission1_max_linear_speed: 3.3
-    mission1_min_linear_speed: 3.3
+    mission1_cruise_speed: 4.0
+    mission1_max_linear_speed: 4.0
+    mission1_min_linear_speed: 4.0
     mission1_max_angular_speed: 2.8
     mission1_max_linear_accel: 3.5
     mission1_max_angular_accel: 3.0
@@ -34,8 +34,8 @@ asp_final_ugv_path_follower:
     mission1_corner_slowdown_speed: 0.5
 
     # Mission3: senior-style rendezvous mode
-    mission3_cruise_speed: 3.0
-    mission3_max_linear_speed: 3.5
+    mission3_cruise_speed: 4.0
+    mission3_max_linear_speed: 4.0
     mission3_min_linear_speed: 0.35
     mission3_max_angular_speed: 2.2
     mission3_max_linear_accel: 1.8
@@ -43,11 +43,11 @@ asp_final_ugv_path_follower:
     mission3_initial_cruise_speed: 1.6
     mission3_initial_max_linear_speed: 2.0
     mission3_initial_max_linear_accel: 1.0
-    mission3_boost_after_sec: 5.0
+    mission3_boost_after_sec: 1.0
     mission3_lookahead_distance: 3.5
     mission3_waypoint_tolerance: 1.2
     mission3_slow_down_distance: 2.0
-    mission3_start_delay_sec: 3.0
+    mission3_start_delay_sec: 2.0
     rendezvous_goal_x: .nan
     rendezvous_goal_y: .nan
     rendezvous_goal_target_speed: .nan

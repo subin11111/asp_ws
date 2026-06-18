@@ -81,6 +81,7 @@ class UavMissionNode(Node):
                 ("prelanding_altitude_m", 8.0),
                 ("prelanding_gimbal_pitch_deg", -90.0),
                 ("prelanding_target_lock_xy_tolerance_m", 2.0),
+                ("landing_prealign_xy_tolerance_m", 2.5),
                 ("landing_hover_altitude_m", 4.0),
                 ("landing_descent_step_m", 3.4),
                 ("landing_complete_altitude_m", 0.0),
@@ -415,7 +416,7 @@ class UavMissionNode(Node):
             landing_yaw = ugv_pose[3] if ugv_pose is not None else yaw
             marker_usable = ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy)
             use_detection_target = bool(self.get_parameter("landing_use_detection_pose_as_target").value)
-            target_locked = self.landing_target_locked(z)
+            target_locked = self.landing_target_locked(z, (x, y))
             if marker_usable and use_detection_target and not target_locked:
                 detection_surface_z = float(self.last_landing_detection["map_z"])
                 detection_xy = (
@@ -439,6 +440,7 @@ class UavMissionNode(Node):
             xy_error = math.hypot(target_x - x, target_y - y)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
             approach_alt = target_surface_z + float(self.get_parameter("landing_approach_altitude_m").value)
+            prealign_alt = target_surface_z + float(self.get_parameter("prelanding_altitude_m").value)
             touchdown_alt = target_surface_z + float(self.get_parameter("landing_touchdown_offset_m").value)
             final_descent_requires_marker = bool(self.get_parameter("landing_final_descent_requires_marker").value)
             marker_gate_open = marker_usable or not final_descent_requires_marker
@@ -448,9 +450,15 @@ class UavMissionNode(Node):
                 and xy_error <= float(self.get_parameter("landing_marker_loss_descent_xy_tolerance_m").value)
                 and z <= approach_alt
             )
-            target_z = max(touchdown_alt, z - descent_step)
-            if xy_error > float(self.get_parameter("landing_xy_tolerance_m").value) or (
-                not marker_gate_open and not marker_loss_descent_ok
+            prealigning = xy_error > float(self.get_parameter("landing_prealign_xy_tolerance_m").value)
+            if prealigning:
+                target_z = prealign_alt
+            else:
+                target_z = max(touchdown_alt, z - descent_step)
+            if not prealigning and (
+                xy_error > float(self.get_parameter("landing_xy_tolerance_m").value) or (
+                    not marker_gate_open and not marker_loss_descent_ok
+                )
             ):
                 target_z = max(approach_alt, z - descent_step)
             if self.landing_land_started is not None:
@@ -642,13 +650,18 @@ class UavMissionNode(Node):
         scale = max_step / dist
         return previous_xy[0] + dx * scale, previous_xy[1] + dy * scale
 
-    def landing_target_locked(self, current_z):
+    def landing_target_locked(self, current_z, current_xy=None):
         if self.landing_target_xy is None or self.landing_target_surface_z is None:
             return False
         if self.landing_land_started is not None or self.landing_land_candidate_started is not None:
             return True
         lock_altitude = float(self.get_parameter("landing_target_lock_altitude_m").value)
-        return current_z <= self.landing_target_surface_z + lock_altitude
+        if current_z > self.landing_target_surface_z + lock_altitude:
+            return False
+        if current_xy is None:
+            return True
+        lock_xy = float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
+        return math.hypot(self.landing_target_xy[0] - current_xy[0], self.landing_target_xy[1] - current_xy[1]) <= lock_xy
 
     def log_landing_status(self, xy_error, current_x, current_y, target_x, target_y, current_z, target_z, marker_usable, target_surface_z):
         if self.elapsed(self.last_landing_status_log) < 1.0:

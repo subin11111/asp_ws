@@ -38,6 +38,7 @@ asp_final_uav_mission_node:
     prelanding_altitude_m: 8.0
     prelanding_gimbal_pitch_deg: -90.0
     prelanding_target_lock_xy_tolerance_m: 2.0
+    landing_prealign_xy_tolerance_m: 2.5
     landing_hover_altitude_m: 4.0
     landing_descent_step_m: 3.4
     landing_complete_altitude_m: 0.02
