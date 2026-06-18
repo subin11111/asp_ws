@@ -190,6 +190,7 @@ function imageTopicCard(topic) {
   return `
     <div class="topic-card">
       <div class="topic-view">
+        ${topic.src ? `<img class="topic-image" src="${esc(topic.src)}" alt="${esc(topic.label)} stream" />` : ""}
         <span class="bbox-label" style="left:8px;top:8px">${esc(topic.status)}</span>
       </div>
       <div class="topic-body">
@@ -564,7 +565,22 @@ function drawMap(data) {
 }
 
 const provider = new MockDashboardDataProvider();
-const tick = () => renderDashboard(provider.snapshot());
-tick();
-setInterval(tick, 500);
-window.addEventListener("resize", tick);
+let latest = provider.snapshot();
+
+async function refreshDashboard() {
+  try {
+    const response = await fetch("/dashboard.json", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`dashboard.json ${response.status}`);
+    }
+    latest = await response.json();
+  } catch (error) {
+    latest = provider.snapshot();
+    latest.health.rosBridgeConnected = false;
+  }
+  renderDashboard(latest);
+}
+
+refreshDashboard();
+setInterval(refreshDashboard, 500);
+window.addEventListener("resize", () => renderDashboard(latest));
