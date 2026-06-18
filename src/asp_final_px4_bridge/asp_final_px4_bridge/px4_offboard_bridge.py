@@ -130,7 +130,10 @@ class Px4OffboardBridge(Node):
         self.publish_status()
 
     def request_disarm_after_landing(self, reason):
-        self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
+        if self.disarm_after_land_sent:
+            return
+        if self.px4_armed():
+            self.vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
         disarm_msg = Bool()
         disarm_msg.data = True
         self.legacy_disarm_pub.publish(disarm_msg)
@@ -215,11 +218,24 @@ class Px4OffboardBridge(Node):
         )
 
     def on_takeoff_origin(self, msg):
-        self.map_anchor = (
+        new_map_anchor = (
             float(msg.pose.position.x),
             float(msg.pose.position.y),
             float(msg.pose.position.z),
         )
+        if self.map_anchor is not None and self.px4_anchor is not None:
+            delta = math.sqrt(
+                (new_map_anchor[0] - self.map_anchor[0]) ** 2
+                + (new_map_anchor[1] - self.map_anchor[1]) ** 2
+                + (new_map_anchor[2] - self.map_anchor[2]) ** 2
+            )
+            self.get_logger().warn(
+                f"Ignoring duplicate Mission2 takeoff origin after PX4 anchor latch; "
+                f"delta={delta:.2f}m",
+                throttle_duration_sec=2.0,
+            )
+            return
+        self.map_anchor = new_map_anchor
         self.set_px4_anchor_from_local_position()
         self.get_logger().info("Received Mission2 takeoff origin")
 
@@ -258,6 +274,8 @@ class Px4OffboardBridge(Node):
         )
 
     def set_px4_anchor_from_local_position(self):
+        if self.px4_anchor is not None:
+            return True
         if self.local_position is None:
             return False
         if not (self.local_position.xy_valid and self.local_position.z_valid):
@@ -439,7 +457,6 @@ class Px4OffboardBridge(Node):
             if (
                 bool(self.get_parameter("auto_disarm_after_landed").value)
                 and not self.disarm_after_land_sent
-                and self.px4_armed()
                 and self.land_ready_since_ns > 0
             ):
                 delay_ns = int(float(self.get_parameter("landed_disarm_delay_sec").value) * 1e9)

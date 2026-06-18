@@ -298,8 +298,8 @@ class UavMissionNode(Node):
             return
         self.phase = "landing"
         self.landing_started = self.now()
-        self.landing_target_xy = self.prelanding_target_xy
-        self.landing_target_surface_z = self.prelanding_target_surface_z
+        self.landing_target_xy = None
+        self.landing_target_surface_z = None
         self.last_landing_detection = None
         self.last_landing_detection_time = None
         self.last_ugv_landing_xy = None
@@ -406,47 +406,54 @@ class UavMissionNode(Node):
 
         if self.phase == "landing":
             self.publish_text(self.landing_state_pub, "landing")
-            if self.landing_land_started is not None:
-                self.publish_bool(self.offboard_enable_pub, False)
-                self.publish_bool(self.land_pub)
-                if self.vehicle_landed and not self.landing_complete_published:
-                    self.publish_bool(self.landing_complete_pub)
-                    self.landing_complete_published = True
-                    self.publish_text(self.landing_event_pub, "landing_complete")
-                return
             ugv_pose = self.current_ugv_landing_pose()
             ugv_xy = (ugv_pose[0], ugv_pose[1]) if ugv_pose is not None else None
             landing_yaw = ugv_pose[3] if ugv_pose is not None else yaw
             marker_usable = ugv_xy is not None and self.landing_detection_is_usable_for_ugv(ugv_xy)
-            use_detection_target = bool(self.get_parameter("landing_use_detection_pose_as_target").value)
-            target_locked = self.landing_target_locked(z, (x, y))
-            if marker_usable and use_detection_target and not target_locked:
-                detection_surface_z = float(self.last_landing_detection["map_z"])
-                detection_xy = (
-                    float(self.last_landing_detection["map_x"]),
-                    float(self.last_landing_detection["map_y"]),
-                )
-                update_min_alt = float(self.get_parameter("landing_detection_update_min_altitude_m").value)
-                if self.landing_target_xy is None or z > detection_surface_z + update_min_alt:
-                    self.landing_target_xy = self.limited_landing_target_update(self.landing_target_xy, detection_xy)
-                    self.landing_target_surface_z = detection_surface_z
-            elif not use_detection_target and ugv_xy is not None and not target_locked:
-                self.landing_target_xy = ugv_xy
-                self.landing_target_surface_z = ugv_pose[2]
+            detection_xy = self.landing_detection_xy() if self.landing_detection_has_map() else None
+            candidate_xy = None
+            if marker_usable and ugv_xy is not None:
+                candidate_xy = ugv_xy
+            elif ugv_xy is not None:
+                candidate_xy = ugv_xy
+            elif detection_xy is not None:
+                candidate_xy = detection_xy
             elif self.landing_target_xy is None:
-                self.landing_target_xy = ugv_xy if ugv_xy is not None else (x, y)
-                self.landing_target_surface_z = ugv_pose[2] if ugv_pose is not None else z
-            target_surface_z = self.landing_target_surface_z
-            if target_surface_z is None:
-                target_surface_z = ugv_pose[2] if ugv_pose is not None else z
-            target_x, target_y = self.apply_landing_target_offset(*self.landing_target_xy, landing_yaw)
+                candidate_xy = (x, y)
+
+            update_min_alt = float(self.get_parameter("landing_detection_update_min_altitude_m").value)
+            allow_target_update = (
+                self.landing_land_started is None
+                and (self.landing_target_xy is None or z > update_min_alt)
+            )
+            if candidate_xy is not None and allow_target_update:
+                if self.landing_target_xy is None:
+                    self.landing_target_xy = candidate_xy
+                else:
+                    jump_limit = float(self.get_parameter("landing_detection_update_max_step_m").value)
+                    jump_distance = math.hypot(
+                        candidate_xy[0] - self.landing_target_xy[0],
+                        candidate_xy[1] - self.landing_target_xy[1],
+                    )
+                    if jump_limit <= 0.0 or jump_distance <= jump_limit:
+                        self.landing_target_xy = candidate_xy
+                    else:
+                        self.get_logger().warn(
+                            f"LANDING_TARGET_JUMP_REJECTED jump={jump_distance:.2f} "
+                            f"candidate_x={candidate_xy[0]:.2f} candidate_y={candidate_xy[1]:.2f}",
+                            throttle_duration_sec=1.0,
+                        )
+            if self.landing_target_xy is None:
+                self.landing_target_xy = (x, y)
+
+            target_x, target_y = self.landing_target_xy
             xy_error = math.hypot(target_x - x, target_y - y)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
+            complete_alt = float(self.get_parameter("landing_complete_altitude_m").value)
             final_descent_xy_tolerance = float(self.get_parameter("landing_final_descent_xy_tolerance_m").value)
             land_command_xy_tolerance = float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
-            approach_alt = target_surface_z + float(self.get_parameter("landing_approach_altitude_m").value)
-            prealign_alt = target_surface_z + float(self.get_parameter("prelanding_altitude_m").value)
-            touchdown_alt = target_surface_z + float(self.get_parameter("landing_touchdown_offset_m").value)
+            approach_alt = float(self.get_parameter("landing_approach_altitude_m").value)
+            touchdown_setpoint = float(self.get_parameter("landing_touchdown_setpoint_m").value)
             final_descent_requires_marker = bool(self.get_parameter("landing_final_descent_requires_marker").value)
             marker_gate_open = marker_usable or not final_descent_requires_marker
             marker_loss_descent_ok = (
@@ -455,19 +462,15 @@ class UavMissionNode(Node):
                 and xy_error <= float(self.get_parameter("landing_marker_loss_descent_xy_tolerance_m").value)
                 and z <= approach_alt
             )
-            prealigning = xy_error > float(self.get_parameter("landing_prealign_xy_tolerance_m").value)
-            if prealigning:
-                target_z = prealign_alt
-            else:
-                target_z = max(touchdown_alt, z - descent_step)
-            if not prealigning and (
+            target_z = max(complete_alt, z - descent_step)
+            if self.landing_land_started is not None:
+                target_z = touchdown_setpoint
+            elif (
                 xy_error > final_descent_xy_tolerance or (
                     not marker_gate_open and not marker_loss_descent_ok
                 )
             ):
                 target_z = max(approach_alt, z - descent_step)
-            if self.landing_land_started is not None:
-                target_z = target_surface_z + float(self.get_parameter("landing_touchdown_setpoint_m").value)
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
             self.log_landing_status(
                 xy_error,
@@ -478,12 +481,13 @@ class UavMissionNode(Node):
                 z,
                 target_z,
                 marker_usable,
-                target_surface_z,
+                0.0,
                 final_descent_xy_tolerance,
                 land_command_xy_tolerance,
             )
+            land_command_alt = max(complete_alt, touchdown_setpoint)
             ready_to_land = (
-                z <= touchdown_alt + float(self.get_parameter("landing_land_command_height_tolerance_m").value)
+                z <= land_command_alt + float(self.get_parameter("landing_land_command_height_tolerance_m").value)
                 and xy_error <= land_command_xy_tolerance
                 and (marker_gate_open or marker_loss_descent_ok)
             )
@@ -642,6 +646,12 @@ class UavMissionNode(Node):
         max_distance = float(self.get_parameter("landing_marker_max_ugv_distance_m").value)
         return math.hypot(marker_xy[0] - ugv_xy[0], marker_xy[1] - ugv_xy[1]) <= max_distance
 
+    def landing_detection_xy(self):
+        return (
+            float(self.last_landing_detection["map_x"]),
+            float(self.last_landing_detection["map_y"]),
+        )
+
     def apply_landing_target_offset(self, x, y, yaw):
         offset_x = float(self.get_parameter("landing_target_offset_body_x_m").value)
         offset_y = float(self.get_parameter("landing_target_offset_body_y_m").value)
@@ -691,7 +701,7 @@ class UavMissionNode(Node):
         current_z,
         target_z,
         marker_usable,
-        target_surface_z,
+        reference_z,
         final_descent_xy_tolerance,
         land_command_xy_tolerance,
     ):
@@ -702,7 +712,7 @@ class UavMissionNode(Node):
             "LANDING_STATUS "
             f"xy_error={xy_error:.2f} current=({current_x:.2f},{current_y:.2f},{current_z:.2f}) "
             f"target=({target_x:.2f},{target_y:.2f},{target_z:.2f}) "
-            f"surface_z={target_surface_z:.2f} final_xy_tol={final_descent_xy_tolerance:.2f} "
+            f"reference_z={reference_z:.2f} final_xy_tol={final_descent_xy_tolerance:.2f} "
             f"land_xy_tol={land_command_xy_tolerance:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
         )
 
