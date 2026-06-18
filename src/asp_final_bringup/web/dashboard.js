@@ -247,6 +247,10 @@ function renderDashboard(data) {
             <div class="section-kicker">Mission / Event Panel</div>
             <h2 class="mt-1 text-lg font-bold text-slate-100">${esc(data.mission.statusText)}</h2>
           </div>
+          <div class="mission-clock ${data.mission.complete ? "complete" : ""}">
+            <div class="section-kicker">${data.mission.complete ? "Mission Complete Time" : "Mission Elapsed Time"}</div>
+            <div class="mission-clock-value">${formatTime(data.mission.elapsedSec)}</div>
+          </div>
           <div class="status-card">
             <div class="status-grid">
               ${statusRow("Current Mission State", data.mission.state)}
@@ -406,7 +410,7 @@ function drawMap(data) {
   const mapW = Math.max(1, bounds.maxX - bounds.minX);
   const mapH = Math.max(1, bounds.maxY - bounds.minY);
   const reservedLeft = 220;
-  const reservedBottom = 106;
+  const reservedBottom = 138;
   const scale = Math.min((w - reservedLeft - 80) / mapW, (h - reservedBottom - 74) / mapH);
   const offsetX = reservedLeft + (w - reservedLeft - mapW * scale) / 2 - bounds.minX * scale;
   const offsetY = 48 + (h - reservedBottom - mapH * scale) / 2 + bounds.maxY * scale;
