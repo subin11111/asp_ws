@@ -106,8 +106,10 @@ class UavMissionNode(Node):
                 ("landing_detection_update_min_altitude_m", 2.0),
                 ("landing_detection_update_max_step_m", 0.7),
                 ("landing_send_px4_land_command", False),
+                ("landing_tf_offset_auto_enabled", True),
+                ("landing_tf_offset_frame", "X1_asp/aruco_marker_10_link"),
                 ("landing_target_offset_body_x_m", 0.0),
-                ("landing_target_offset_body_y_m", 0.55),
+                ("landing_target_offset_body_y_m", 0.0),
             ],
         )
         self.map_frame = self.get_parameter("map_frame").value
@@ -142,6 +144,7 @@ class UavMissionNode(Node):
         self.landing_complete_published = False
         self.vehicle_landed = False
         self.last_landing_status_log = self.now()
+        self.last_landing_tf_offset_info = None
         self.mission_state = "IDLE"
         self.preroll_origin_published = False
 
@@ -603,6 +606,11 @@ class UavMissionNode(Node):
         return (pose[0], pose[1]) if pose is not None else self.last_ugv_landing_xy
 
     def current_ugv_landing_pose(self):
+        if bool(self.get_parameter("landing_tf_offset_auto_enabled").value):
+            pose = self.current_ugv_landing_pose_from_tf_offset()
+            if pose is not None:
+                return pose
+
         last_error = None
         for frame in (self.ugv_landing_frame, self.ugv_base_frame):
             try:
@@ -610,6 +618,15 @@ class UavMissionNode(Node):
                 pos = transform.transform.translation
                 yaw = yaw_from_quaternion(transform.transform.rotation)
                 self.last_ugv_landing_xy = (pos.x, pos.y)
+                self.last_landing_tf_offset_info = {
+                    "source": f"tf:{frame}",
+                    "offset_frame": frame,
+                    "body_x": 0.0,
+                    "body_y": 0.0,
+                    "body_z": 0.0,
+                    "base_x": pos.x,
+                    "base_y": pos.y,
+                }
                 return pos.x, pos.y, pos.z, yaw
             except TransformException as exc:
                 last_error = (frame, exc)
@@ -620,6 +637,57 @@ class UavMissionNode(Node):
                 throttle_duration_sec=2.0,
             )
         return None
+
+    def current_ugv_landing_pose_from_tf_offset(self):
+        offset_frame = str(self.get_parameter("landing_tf_offset_frame").value).strip()
+        if not offset_frame:
+            return None
+        try:
+            base_transform = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.ugv_base_frame,
+                rclpy.time.Time(),
+            )
+            offset_transform = self.tf_buffer.lookup_transform(
+                self.ugv_base_frame,
+                offset_frame,
+                rclpy.time.Time(),
+            )
+        except TransformException as exc:
+            self.get_logger().warn(
+                f"Waiting for landing TF offset {self.ugv_base_frame}->{offset_frame}: {exc}",
+                throttle_duration_sec=2.0,
+            )
+            return None
+
+        base_pos = base_transform.transform.translation
+        base_yaw = yaw_from_quaternion(base_transform.transform.rotation)
+        offset = offset_transform.transform.translation
+        manual_x = float(self.get_parameter("landing_target_offset_body_x_m").value)
+        manual_y = float(self.get_parameter("landing_target_offset_body_y_m").value)
+        body_x = float(offset.x) + manual_x
+        body_y = float(offset.y) + manual_y
+        body_z = float(offset.z)
+        target_x, target_y, target_z = self.apply_body_offset(
+            float(base_pos.x),
+            float(base_pos.y),
+            float(base_pos.z),
+            base_yaw,
+            body_x,
+            body_y,
+            body_z,
+        )
+        self.last_ugv_landing_xy = (target_x, target_y)
+        self.last_landing_tf_offset_info = {
+            "source": "tf_auto_offset",
+            "offset_frame": offset_frame,
+            "body_x": body_x,
+            "body_y": body_y,
+            "body_z": body_z,
+            "base_x": float(base_pos.x),
+            "base_y": float(base_pos.y),
+        }
+        return target_x, target_y, target_z, base_yaw
 
     def landing_detection_has_map(self):
         if not self.last_landing_detection or not self.last_landing_detection.get("has_map", False):
@@ -657,11 +725,18 @@ class UavMissionNode(Node):
         offset_y = float(self.get_parameter("landing_target_offset_body_y_m").value)
         if abs(offset_x) < 1e-6 and abs(offset_y) < 1e-6:
             return x, y
+        target_x, target_y, _ = self.apply_body_offset(x, y, 0.0, yaw, offset_x, offset_y, 0.0)
+        return target_x, target_y
+
+    def apply_body_offset(self, x, y, z, yaw, offset_x, offset_y, offset_z=0.0):
+        if abs(offset_x) < 1e-6 and abs(offset_y) < 1e-6 and abs(offset_z) < 1e-6:
+            return x, y, z
         cos_yaw = math.cos(yaw)
         sin_yaw = math.sin(yaw)
         return (
             x + cos_yaw * offset_x - sin_yaw * offset_y,
             y + sin_yaw * offset_x + cos_yaw * offset_y,
+            z + offset_z,
         )
 
     def limited_landing_target_update(self, previous_xy, detected_xy):
@@ -708,12 +783,23 @@ class UavMissionNode(Node):
         if self.elapsed(self.last_landing_status_log) < 1.0:
             return
         self.last_landing_status_log = self.now()
+        tf_offset = self.last_landing_tf_offset_info or {}
+        target_source = tf_offset.get("source", "unknown")
+        offset_frame = tf_offset.get("offset_frame", "none")
+        offset_body_x = float(tf_offset.get("body_x", 0.0))
+        offset_body_y = float(tf_offset.get("body_y", 0.0))
+        offset_body_z = float(tf_offset.get("body_z", 0.0))
+        base_x = float(tf_offset.get("base_x", target_x))
+        base_y = float(tf_offset.get("base_y", target_y))
         self.get_logger().info(
             "LANDING_STATUS "
             f"xy_error={xy_error:.2f} current=({current_x:.2f},{current_y:.2f},{current_z:.2f}) "
             f"target=({target_x:.2f},{target_y:.2f},{target_z:.2f}) "
             f"reference_z={reference_z:.2f} final_xy_tol={final_descent_xy_tolerance:.2f} "
-            f"land_xy_tol={land_command_xy_tolerance:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
+            f"land_xy_tol={land_command_xy_tolerance:.2f} marker_usable={marker_usable} landed={self.vehicle_landed} "
+            f"target_source={target_source} offset_frame={offset_frame} "
+            f"offset_body=({offset_body_x:.2f},{offset_body_y:.2f},{offset_body_z:.2f}) "
+            f"base=({base_x:.2f},{base_y:.2f})"
         )
 
     def build_mission2_runtime_waypoints(self, start_x, start_y, start_z):

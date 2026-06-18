@@ -63,5 +63,7 @@ asp_final_uav_mission_node:
     landing_detection_update_min_altitude_m: 2.0
     landing_detection_update_max_step_m: 0.7
     landing_send_px4_land_command: true
+    landing_tf_offset_auto_enabled: true
+    landing_tf_offset_frame: X1_asp/aruco_marker_10_link
     landing_target_offset_body_x_m: 0.0
-    landing_target_offset_body_y_m: 0.60
+    landing_target_offset_body_y_m: 0.0
