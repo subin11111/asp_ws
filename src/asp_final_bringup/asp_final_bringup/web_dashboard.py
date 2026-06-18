@@ -39,6 +39,8 @@ MISSION_STEPS = [
 UAV_IMAGE_TOPIC = "/world/default/model/x500_gimbal_0/link/camera_link/sensor/camera/image"
 UGV_IMAGE_TOPIC = "/world/default/model/X1_asp/link/base_link/sensor/camera_front/image"
 ANNOTATED_IMAGE_TOPIC = "/asp_final/perception/uav/aruco/annotated"
+DASHBOARD_START_TOPIC = "/asp_final/dashboard/start_request"
+MISSION_START_TOPIC = "/asp_final/mission/start"
 
 
 def dashboard_root():
@@ -225,17 +227,17 @@ class DashboardState:
                 },
                 "imageTopics": [
                     {
-                        "name": UAV_IMAGE_TOPIC,
-                        "label": "UAV front camera",
-                        "status": "ArUco overlay",
+                        "name": UGV_IMAGE_TOPIC,
+                        "label": "UGV front camera",
+                        "status": "raw stream",
                         "fps": 30,
                         "latencyMs": 0,
-                        "src": "/stream/uav.mjpg",
+                        "src": "/stream/ugv.mjpg",
                     },
                     {
                         "name": ANNOTATED_IMAGE_TOPIC,
-                        "label": "Landing camera",
-                        "status": "marker_10 lock",
+                        "label": "UAV ArUco camera",
+                        "status": "detected corners",
                         "fps": 24,
                         "latencyMs": 0,
                         "src": "/stream/landing.mjpg",
@@ -262,6 +264,9 @@ class DashboardRosNode(Node):
         self.create_subscription(String, "/asp_final/ugv/state", self.on_ugv_state, 10)
         self.create_subscription(String, "/asp_final/ugv/event", self.on_ugv_event, 10)
         self.create_subscription(String, "/asp_final/px4/status", self.on_px4_status, 10)
+        self.dashboard_start_request_pub = self.create_publisher(Bool, DASHBOARD_START_TOPIC, 10)
+        self.mission_start_relay_pub = self.create_publisher(Bool, MISSION_START_TOPIC, 10)
+        self.create_subscription(Bool, DASHBOARD_START_TOPIC, self.on_dashboard_start_request, 10)
         self.create_subscription(Int32, "/asp_final/perception/uav/marker_id", self.on_marker_id, 10)
         self.create_subscription(Detection3DArray, "/asp_final/perception/uav/marker_detections", self.on_detections, 10)
         self.create_subscription(Detection3DArray, "/asp_final/perception/landing/marker_detections", self.on_detections, 10)
@@ -271,6 +276,20 @@ class DashboardRosNode(Node):
         self.create_subscription(Image, ANNOTATED_IMAGE_TOPIC, lambda msg: self.on_image(msg, "landing"), qos)
         self.create_timer(0.1, self.update_tf)
         self.get_logger().info("ASP dashboard bridge ready: /dashboard.json and /stream/*.mjpg")
+
+    def request_mission_start_from_dashboard(self):
+        msg = Bool()
+        msg.data = True
+        self.dashboard_start_request_pub.publish(msg)
+        self.state.add_event("info", "dashboard_start_request")
+
+    def on_dashboard_start_request(self, msg):
+        if not msg.data:
+            return
+        out = Bool()
+        out.data = True
+        self.mission_start_relay_pub.publish(out)
+        self.state.add_event("info", "dashboard_start_relayed_to_mission_start")
 
     def on_mission_state(self, msg):
         with self.state.lock:
@@ -386,6 +405,7 @@ class DashboardRosNode(Node):
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
     state = None
+    ros_node = None
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -400,6 +420,31 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self.send_mjpeg(key)
             return
         super().do_GET()
+
+    def do_POST(self):
+        if self.path == "/api/dashboard/start":
+            self.send_dashboard_start()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def send_dashboard_start(self):
+        if self.ros_node is None:
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.ros_node.request_mission_start_from_dashboard()
+        body = json.dumps(
+            {
+                "ok": True,
+                "requestTopic": DASHBOARD_START_TOPIC,
+                "relayTopic": MISSION_START_TOPIC,
+            },
+            separators=(",", ":"),
+        ).encode()
+        self.send_response(HTTPStatus.ACCEPTED)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_dashboard_json(self):
         body = json.dumps(self.state.snapshot(), separators=(",", ":")).encode()
@@ -460,6 +505,7 @@ def main(args=None):
 
     os.chdir(dashboard_root())
     DashboardRequestHandler.state = state
+    DashboardRequestHandler.ros_node = node
     try:
         with DashboardTCPServer((parsed.host, parsed.port), DashboardRequestHandler) as httpd:
             print(f"ASP dashboard: http://{parsed.host}:{parsed.port}/", flush=True)
@@ -474,6 +520,7 @@ def main(args=None):
             return
         raise
     finally:
-        node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        spin_thread.join(timeout=1.0)
+        node.destroy_node()

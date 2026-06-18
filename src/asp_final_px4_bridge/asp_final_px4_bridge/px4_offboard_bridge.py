@@ -360,6 +360,37 @@ class Px4OffboardBridge(Node):
         now_ns = self.get_clock().now().nanoseconds
         return last_request_ns == 0 or (now_ns - last_request_ns) > 1_000_000_000
 
+    def publish_position_setpoint(self):
+        offboard = OffboardControlMode()
+        offboard.timestamp = self.timestamp_us()
+        offboard.position = True
+        offboard.velocity = False
+        offboard.acceleration = False
+        offboard.attitude = False
+        offboard.body_rate = False
+        self.offboard_pub.publish(offboard)
+
+        if not (self.last_pose and self.px4_ready_for_position_setpoint()):
+            return False
+
+        pose = self.last_pose.pose
+        setpoint = TrajectorySetpoint()
+        setpoint.timestamp = self.timestamp_us()
+        setpoint.position = self.map_pose_to_px4_ned(pose)
+        setpoint.velocity, setpoint.acceleration = self.climb_feedforward(pose, setpoint.position)
+        setpoint.yaw = float(self.yaw_enu_to_ned(yaw_from_quaternion(pose.orientation)))
+        self.setpoint_pub.publish(setpoint)
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self.last_setpoint_log_ns > 2_000_000_000:
+            self.last_setpoint_log_ns = now_ns
+            self.get_logger().info(
+                f"Publishing PX4 setpoint NED: x={setpoint.position[0]:.2f} "
+                f"y={setpoint.position[1]:.2f} z={setpoint.position[2]:.2f} yaw={setpoint.yaw:.2f}"
+            )
+        if self.setpoint_counter < int(self.get_parameter("preoffboard_setpoint_count").value):
+            self.setpoint_counter += 1
+        return True
+
     def publish_status(self, throttle=False):
         now_ns = self.get_clock().now().nanoseconds
         if throttle and (now_ns - self.last_status_pub_ns) < 1_000_000_000:
@@ -399,6 +430,8 @@ class Px4OffboardBridge(Node):
     def tick(self):
         if self.land_requested:
             now_ns = self.get_clock().now().nanoseconds
+            if self.px4_in_offboard():
+                self.publish_position_setpoint()
             retry_ns = int(float(self.get_parameter("land_command_retry_sec").value) * 1e9)
             if self.px4_armed() and now_ns - self.last_land_request_ns >= retry_ns:
                 self.vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
@@ -415,32 +448,7 @@ class Px4OffboardBridge(Node):
             self.publish_status(throttle=True)
             return
 
-        offboard = OffboardControlMode()
-        offboard.timestamp = self.timestamp_us()
-        offboard.position = True
-        offboard.velocity = False
-        offboard.acceleration = False
-        offboard.attitude = False
-        offboard.body_rate = False
-        self.offboard_pub.publish(offboard)
-
-        if self.last_pose and self.px4_ready_for_position_setpoint():
-            pose = self.last_pose.pose
-            setpoint = TrajectorySetpoint()
-            setpoint.timestamp = self.timestamp_us()
-            setpoint.position = self.map_pose_to_px4_ned(pose)
-            setpoint.velocity, setpoint.acceleration = self.climb_feedforward(pose, setpoint.position)
-            setpoint.yaw = float(self.yaw_enu_to_ned(yaw_from_quaternion(pose.orientation)))
-            self.setpoint_pub.publish(setpoint)
-            now_ns = self.get_clock().now().nanoseconds
-            if now_ns - self.last_setpoint_log_ns > 2_000_000_000:
-                self.last_setpoint_log_ns = now_ns
-                self.get_logger().info(
-                    f"Publishing PX4 setpoint NED: x={setpoint.position[0]:.2f} "
-                    f"y={setpoint.position[1]:.2f} z={setpoint.position[2]:.2f} yaw={setpoint.yaw:.2f}"
-                )
-            if self.setpoint_counter < int(self.get_parameter("preoffboard_setpoint_count").value):
-                self.setpoint_counter += 1
+        self.publish_position_setpoint()
 
         command_gate_open = (
             self.offboard_command_enabled

@@ -2,6 +2,7 @@ import math
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
@@ -108,8 +109,8 @@ class FinalPoseTfBroadcaster(Node):
     def is_robot_transform(self, robot_key, transform):
         child = transform.child_frame_id
         if robot_key == "ugv":
-            return child == "X1_asp"
-        return child == "x500_gimbal_0"
+            return child == self.frames["ugv"] or child == "X1_asp"
+        return child == self.frames["uav"] or child == "x500_gimbal_0"
 
     def publish_alias(self, robot_key, source):
         alias = TransformStamped()
@@ -143,6 +144,9 @@ def main(args=None):
     node = FinalPoseTfBroadcaster()
     try:
         rclpy.spin(node)
+    except (ExternalShutdownException, KeyboardInterrupt):
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

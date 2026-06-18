@@ -83,7 +83,7 @@ class UavMissionNode(Node):
                 ("prelanding_target_lock_xy_tolerance_m", 2.0),
                 ("landing_prealign_xy_tolerance_m", 2.5),
                 ("landing_hover_altitude_m", 4.0),
-                ("landing_descent_step_m", 3.4),
+                ("landing_descent_step_m", 0.6),
                 ("landing_complete_altitude_m", 0.0),
                 ("landing_timeout_s", 30.0),
                 ("landing_detection_timeout_s", 2.0),
@@ -94,9 +94,10 @@ class UavMissionNode(Node):
                 ("landing_land_command_height_tolerance_m", 0.06),
                 ("landing_touchdown_disarm_height_tolerance_m", 0.15),
                 ("landing_xy_tolerance_m", 1.0),
-                ("landing_land_command_xy_tolerance_m", 0.2),
-                ("landing_touchdown_disarm_xy_tolerance_m", 0.2),
-                ("landing_land_command_stable_sec", 1.0),
+                ("landing_final_descent_xy_tolerance_m", 0.35),
+                ("landing_land_command_xy_tolerance_m", 0.35),
+                ("landing_touchdown_disarm_xy_tolerance_m", 0.35),
+                ("landing_land_command_stable_sec", 0.5),
                 ("landing_marker_loss_descent_xy_tolerance_m", 0.8),
                 ("landing_marker_id", 10),
                 ("landing_marker_max_ugv_distance_m", 2.0),
@@ -106,7 +107,7 @@ class UavMissionNode(Node):
                 ("landing_detection_update_max_step_m", 0.7),
                 ("landing_send_px4_land_command", False),
                 ("landing_target_offset_body_x_m", 0.0),
-                ("landing_target_offset_body_y_m", 0.0),
+                ("landing_target_offset_body_y_m", 0.55),
             ],
         )
         self.map_frame = self.get_parameter("map_frame").value
@@ -311,11 +312,13 @@ class UavMissionNode(Node):
 
     def tick(self):
         self.publish_text(self.exploration_state_pub, self.phase)
-        self.publish_bool(self.offboard_enable_pub, self.phase != "idle")
         if self.phase == "idle":
             if self.should_mission1_preroll():
                 self.publish_mission1_preroll()
+            else:
+                self.publish_bool(self.offboard_enable_pub, False)
             return
+        self.publish_bool(self.offboard_enable_pub, True)
         try:
             x, y, z, yaw = self.current_pose()
             self.last_pose = (x, y, z, yaw)
@@ -439,6 +442,8 @@ class UavMissionNode(Node):
             target_x, target_y = self.apply_landing_target_offset(*self.landing_target_xy, landing_yaw)
             xy_error = math.hypot(target_x - x, target_y - y)
             descent_step = float(self.get_parameter("landing_descent_step_m").value)
+            final_descent_xy_tolerance = float(self.get_parameter("landing_final_descent_xy_tolerance_m").value)
+            land_command_xy_tolerance = float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
             approach_alt = target_surface_z + float(self.get_parameter("landing_approach_altitude_m").value)
             prealign_alt = target_surface_z + float(self.get_parameter("prelanding_altitude_m").value)
             touchdown_alt = target_surface_z + float(self.get_parameter("landing_touchdown_offset_m").value)
@@ -456,7 +461,7 @@ class UavMissionNode(Node):
             else:
                 target_z = max(touchdown_alt, z - descent_step)
             if not prealigning and (
-                xy_error > float(self.get_parameter("landing_xy_tolerance_m").value) or (
+                xy_error > final_descent_xy_tolerance or (
                     not marker_gate_open and not marker_loss_descent_ok
                 )
             ):
@@ -464,16 +469,28 @@ class UavMissionNode(Node):
             if self.landing_land_started is not None:
                 target_z = target_surface_z + float(self.get_parameter("landing_touchdown_setpoint_m").value)
             self.cmd_pose_pub.publish(self.pose_msg(target_x, target_y, target_z, landing_yaw))
-            self.log_landing_status(xy_error, x, y, target_x, target_y, z, target_z, marker_usable, target_surface_z)
+            self.log_landing_status(
+                xy_error,
+                x,
+                y,
+                target_x,
+                target_y,
+                z,
+                target_z,
+                marker_usable,
+                target_surface_z,
+                final_descent_xy_tolerance,
+                land_command_xy_tolerance,
+            )
             ready_to_land = (
                 z <= touchdown_alt + float(self.get_parameter("landing_land_command_height_tolerance_m").value)
-                and xy_error <= float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
+                and xy_error <= land_command_xy_tolerance
                 and (marker_gate_open or marker_loss_descent_ok)
             )
             timed_out_on_target = (
                 self.elapsed(self.landing_started) > float(self.get_parameter("landing_timeout_s").value)
                 and ugv_xy is not None
-                and xy_error <= float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
+                and xy_error <= land_command_xy_tolerance
                 and (marker_gate_open or marker_loss_descent_ok)
             )
             land_command_candidate = ready_to_land or timed_out_on_target
@@ -513,6 +530,7 @@ class UavMissionNode(Node):
             self.get_logger().warn(f"Waiting for UAV TF for mission1 pre-roll: {exc}", throttle_duration_sec=2.0)
             return
         pose = self.pose_msg(x, y, z, yaw)
+        self.publish_bool(self.offboard_enable_pub, True)
         self.cmd_pose_pub.publish(pose)
         if not self.preroll_origin_published:
             self.takeoff_origin_pub.publish(pose)
@@ -663,7 +681,20 @@ class UavMissionNode(Node):
         lock_xy = float(self.get_parameter("landing_land_command_xy_tolerance_m").value)
         return math.hypot(self.landing_target_xy[0] - current_xy[0], self.landing_target_xy[1] - current_xy[1]) <= lock_xy
 
-    def log_landing_status(self, xy_error, current_x, current_y, target_x, target_y, current_z, target_z, marker_usable, target_surface_z):
+    def log_landing_status(
+        self,
+        xy_error,
+        current_x,
+        current_y,
+        target_x,
+        target_y,
+        current_z,
+        target_z,
+        marker_usable,
+        target_surface_z,
+        final_descent_xy_tolerance,
+        land_command_xy_tolerance,
+    ):
         if self.elapsed(self.last_landing_status_log) < 1.0:
             return
         self.last_landing_status_log = self.now()
@@ -671,7 +702,8 @@ class UavMissionNode(Node):
             "LANDING_STATUS "
             f"xy_error={xy_error:.2f} current=({current_x:.2f},{current_y:.2f},{current_z:.2f}) "
             f"target=({target_x:.2f},{target_y:.2f},{target_z:.2f}) "
-            f"surface_z={target_surface_z:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
+            f"surface_z={target_surface_z:.2f} final_xy_tol={final_descent_xy_tolerance:.2f} "
+            f"land_xy_tol={land_command_xy_tolerance:.2f} marker_usable={marker_usable} landed={self.vehicle_landed}"
         )
 
     def build_mission2_runtime_waypoints(self, start_x, start_y, start_z):

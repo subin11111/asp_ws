@@ -54,16 +54,16 @@ class MockDashboardDataProvider {
       },
       imageTopics: [
         {
-          name: "/asp_final/uav/camera/image_raw",
-          label: "UAV front camera",
-          status: "ArUco overlay",
+          name: "/world/default/model/X1_asp/link/base_link/sensor/camera_front/image",
+          label: "UGV front camera",
+          status: "raw stream",
           fps: 30,
           latencyMs: 42,
         },
         {
-          name: "/asp_final/landing/camera/image_raw",
-          label: "Landing camera",
-          status: "marker_10 lock",
+          name: "/asp_final/perception/uav/aruco/annotated",
+          label: "UAV ArUco camera",
+          status: "detected corners",
           fps: 24,
           latencyMs: 55,
         },
@@ -186,12 +186,15 @@ function markerCard(marker, large = false) {
   `;
 }
 
-function imageTopicCard(topic) {
+function imageTopicCard(topic, markers) {
+  const detected = markers
+    .filter((marker) => marker.detected && marker.pose)
+    .sort((a, b) => (a.lastSeenSecAgo ?? 999) - (b.lastSeenSecAgo ?? 999))
+    .slice(0, 3);
   return `
     <div class="topic-card">
       <div class="topic-view">
         ${topic.src ? `<img class="topic-image" src="${esc(topic.src)}" alt="${esc(topic.label)} stream" />` : ""}
-        <span class="bbox-label" style="left:8px;top:8px">${esc(topic.status)}</span>
       </div>
       <div class="topic-body">
         <div class="section-kicker">${esc(topic.label)}</div>
@@ -199,6 +202,14 @@ function imageTopicCard(topic) {
         <div class="mt-2 flex flex-wrap gap-2">
           <span class="pill ok">FPS ${topic.fps}</span>
           <span class="pill ok">LAT ${topic.latencyMs}ms</span>
+        </div>
+        <div class="coord-readout">
+          ${detected.length ? detected.map((marker) => `
+            <div class="coord-row">
+              <span>M${marker.id}</span>
+              <b>${fmt(marker.pose.x, 1)}, ${fmt(marker.pose.y, 1)}, ${fmt(marker.pose.z, 1)}</b>
+            </div>
+          `).join("") : '<div class="coord-empty">No marker coordinate lock</div>'}
         </div>
       </div>
     </div>
@@ -250,6 +261,10 @@ function renderDashboard(data) {
           <div class="mission-clock ${data.mission.complete ? "complete" : ""}">
             <div class="section-kicker">${data.mission.complete ? "Mission Complete Time" : "Mission Elapsed Time"}</div>
             <div class="mission-clock-value">${formatTime(data.mission.elapsedSec)}</div>
+            <button class="mission-start-button" type="button" onclick="requestDashboardStart()" ${startRequestBusy ? "disabled" : ""}>
+              ${startRequestBusy ? "SENDING START REQUEST" : "START TRIGGER"}
+            </button>
+            <div class="mission-command-feedback ${startRequestFeedback.tone}">${esc(startRequestFeedback.text)}</div>
           </div>
           <div class="status-card">
             <div class="status-grid">
@@ -310,7 +325,7 @@ function renderDashboard(data) {
               <div class="hud-row text-xs"><span>Landing Target</span><b class="value text-emerald-300">aruco_marker_10_link</b></div>
             </div>
             <div class="topic-strip">
-              ${data.imageTopics.map((topic) => imageTopicCard(topic)).join("")}
+              ${data.imageTopics.map((topic) => imageTopicCard(topic, data.markers)).join("")}
             </div>
           </div>
         </main>
@@ -410,7 +425,7 @@ function drawMap(data) {
   const mapW = Math.max(1, bounds.maxX - bounds.minX);
   const mapH = Math.max(1, bounds.maxY - bounds.minY);
   const reservedLeft = 220;
-  const reservedBottom = 138;
+  const reservedBottom = 202;
   const scale = Math.min((w - reservedLeft - 80) / mapW, (h - reservedBottom - 74) / mapH);
   const offsetX = reservedLeft + (w - reservedLeft - mapW * scale) / 2 - bounds.minX * scale;
   const offsetY = 48 + (h - reservedBottom - mapH * scale) / 2 + bounds.maxY * scale;
@@ -570,6 +585,28 @@ function drawMap(data) {
 
 const provider = new MockDashboardDataProvider();
 let latest = provider.snapshot();
+let startRequestBusy = false;
+let startRequestFeedback = { tone: "idle", text: "Web trigger path: dashboard/start_request" };
+
+async function requestDashboardStart() {
+  if (startRequestBusy) return;
+  startRequestBusy = true;
+  startRequestFeedback = { tone: "pending", text: "Publishing dashboard start request..." };
+  renderDashboard(latest);
+  try {
+    const response = await fetch("/api/dashboard/start", { method: "POST", cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const result = await response.json();
+    startRequestFeedback = { tone: "ok", text: `${result.requestTopic} -> ${result.relayTopic}` };
+  } catch (error) {
+    startRequestFeedback = { tone: "bad", text: `Start request failed: ${error.message}` };
+  } finally {
+    startRequestBusy = false;
+    renderDashboard(latest);
+  }
+}
 
 async function refreshDashboard() {
   try {

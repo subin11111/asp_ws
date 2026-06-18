@@ -40,7 +40,7 @@ asp_final_uav_mission_node:
     prelanding_target_lock_xy_tolerance_m: 2.0
     landing_prealign_xy_tolerance_m: 2.5
     landing_hover_altitude_m: 4.0
-    landing_descent_step_m: 3.4
+    landing_descent_step_m: 0.6
     landing_complete_altitude_m: 0.02
     landing_timeout_s: 30.0
     landing_detection_timeout_s: 2.0
@@ -51,9 +51,10 @@ asp_final_uav_mission_node:
     landing_land_command_height_tolerance_m: 0.10
     landing_touchdown_disarm_height_tolerance_m: 0.15
     landing_xy_tolerance_m: 1.0
-    landing_land_command_xy_tolerance_m: 0.2
-    landing_touchdown_disarm_xy_tolerance_m: 0.2
-    landing_land_command_stable_sec: 0.2
+    landing_final_descent_xy_tolerance_m: 0.35
+    landing_land_command_xy_tolerance_m: 0.35
+    landing_touchdown_disarm_xy_tolerance_m: 0.35
+    landing_land_command_stable_sec: 0.5
     landing_marker_loss_descent_xy_tolerance_m: 0.8
     landing_marker_id: 10
     landing_marker_max_ugv_distance_m: 2.0
@@ -63,4 +64,4 @@ asp_final_uav_mission_node:
     landing_detection_update_max_step_m: 0.7
     landing_send_px4_land_command: true
     landing_target_offset_body_x_m: 0.0
-    landing_target_offset_body_y_m: 0.0
+    landing_target_offset_body_y_m: 0.60

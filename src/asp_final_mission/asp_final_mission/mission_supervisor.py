@@ -1,6 +1,7 @@
 from enum import Enum
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
@@ -54,7 +55,10 @@ class MissionSupervisor(Node):
         pub.publish(msg)
 
     def on_start(self, msg):
-        if msg.data and self.state == MissionState.IDLE:
+        if not msg.data:
+            return
+        self.get_logger().info(f"Mission start trigger received in state={self.state.value}")
+        if self.state == MissionState.IDLE:
             self.state = MissionState.MISSION1_CARRIER
             self.publish_bool(self.m1_start_pub)
             self.publish_text(self.status_pub, "Mission1 carrier path started")
@@ -119,6 +123,9 @@ def main(args=None):
     node = MissionSupervisor()
     try:
         rclpy.spin(node)
+    except (ExternalShutdownException, KeyboardInterrupt):
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
